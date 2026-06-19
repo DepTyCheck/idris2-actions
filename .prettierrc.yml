@@ -1,0 +1,2 @@
+# Don't reformat code blocks embedded in markdown
+embeddedLanguageFormatting: "off"

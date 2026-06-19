@@ -1,0 +1,216 @@
+name: Build and test
+
+on:
+  workflow_call:
+    inputs:
+      ipkg_path:
+        description: Path to the .ipkg to build and test. By default expects .ipkg in repo root.
+        required: false
+        type: string
+        default: ""
+      container_tag:
+        description: Tag for the ghcr.io/stefan-hoeck/idris2-pack container.
+        required: false
+        type: string
+        default: latest
+      run_tests:
+        description: Run `pack test` after building. Set false to only build and cache.
+        required: false
+        type: boolean
+        default: true
+    outputs:
+      variants:
+        description: JSON array of { mode, cache_key } for each built variant.
+        value: ${{ jobs.get-upstream-matrix.outputs.variants }}
+      package:
+        description: The package name parsed from the .ipkg.
+        value: ${{ jobs.get-upstream-matrix.outputs.package }}
+      project_dir:
+        description: Directory holding the .ipkg and pack.toml.
+        value: ${{ jobs.get-upstream-matrix.outputs.project_dir }}
+      build_dir:
+        description: The package's build dir (relative to project_dir).
+        value: ${{ jobs.get-upstream-matrix.outputs.build_dir }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.ipkg_path }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  get-upstream-matrix:
+    name: Acquire matrix of upstream modes
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
+    outputs:
+      variants: ${{ steps.matrix.outputs.variants }}
+      package: ${{ steps.matrix.outputs.package }}
+      project_dir: ${{ steps.matrix.outputs.project_dir }}
+      build_dir: ${{ steps.matrix.outputs.build_dir }}
+    steps:
+      - name: Install git
+        run: apt-get update && apt-get install -y git
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Find the package .ipkg
+        env:
+          IPKG_PATH: ${{ inputs.ipkg_path }}
+        run: |
+          ipkg="$IPKG_PATH"
+
+          if [ -n "$ipkg" ]; then
+            echo "Using provided ipkg_path: $ipkg"
+          else
+            mapfile -t root_ipkgs < <(find . -maxdepth 1 -name '*.ipkg' -type f)
+
+            case ${#root_ipkgs[@]} in
+              0)
+                echo "error: no .ipkg found in repo root; set ipkg_path"
+                exit 1
+                ;;
+              1)
+                ipkg="${root_ipkgs[0]}"
+                ;;
+              *)
+                ipkg="${root_ipkgs[0]}"
+                echo "warning: multiple .ipkg in root, using $ipkg"
+                ;;
+            esac
+          fi
+
+          if [ ! -f "$ipkg" ]; then
+            echo "error: ipkg not found: $ipkg"
+            exit 1
+          fi
+
+          {
+            echo "IPKG=$ipkg"
+            echo "PROJECT_DIR=$(dirname "$ipkg")"
+          } >> "$GITHUB_ENV"
+
+      - name: Parse package name and build dir
+        run: |
+          package=$(awk '/^[[:space:]]*package[[:space:]]/ {print $2; exit}' "$IPKG")
+
+          builddir_line=$(awk '/^[[:space:]]*builddir[[:space:]]*=/ {print; exit}' "$IPKG") # find the line
+          build_dir="${builddir_line#*=}"           # get the path
+          build_dir="${build_dir//[\"[:space:]]/}"  # strip quotes
+          build_dir="${build_dir:-build}"           # set default `build`
+
+          echo "Package '$package', build dir '$build_dir'"
+          {
+            echo "PACKAGE=$package"
+            echo "BUILD_DIR=$build_dir"
+          } >> "$GITHUB_ENV"
+
+      - name: Hash sources for the cache key
+        run: |
+          # Hash of the package's sources
+          # from https://stackoverflow.com/q/545387
+          hash=$(find "$PROJECT_DIR/src" "$IPKG" "$PROJECT_DIR/pack.toml" -type f -print0 2>/dev/null \
+            | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
+
+          echo "Source hash: $hash"
+          echo "HASH=$hash" >> "$GITHUB_ENV"
+
+      - name: Compute build variants
+        id: matrix
+        run: |
+          current=$(idris2 --version | sed 's/.*-//')
+          upstream=$(git ls-remote https://github.com/idris-lang/Idris2 main | head -c 9)
+          echo "Current: $current, bleeding edge: $upstream"
+
+          variant() {
+            printf '{"mode":"%s","cache_key":"build-%s-%s-%s"}' "$1" "$HASH" "$1" "$2"
+          }
+          latest=$(variant latest-pack-collection "$current")
+          if [ "$current" = "$upstream" ]; then
+            variants="[$latest]"
+          else
+            variants="[$latest, $(variant bleeding-edge-compiler "$upstream")]"
+          fi
+          echo "Variants: $variants"
+
+          {
+            echo "package=$PACKAGE"
+            echo "project_dir=$PROJECT_DIR"
+            echo "build_dir=$BUILD_DIR"
+            echo "variants=$variants"
+          } >> "$GITHUB_OUTPUT"
+
+  build-and-test:
+    name: Build & test ${{ needs.get-upstream-matrix.outputs.package }} (${{ matrix.variant.mode }})
+    needs: get-upstream-matrix
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
+    env:
+      PROJECT_DIR: ${{ needs.get-upstream-matrix.outputs.project_dir }}
+      BUILD_DIR: ${{ needs.get-upstream-matrix.outputs.build_dir }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(needs.get-upstream-matrix.outputs.variants) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Update pack database
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: pack update-db
+
+      - name: Switch to the bleeding edge compiler
+        if: matrix.variant.mode == 'bleeding-edge-compiler'
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          { echo; echo "[idris2]"; echo 'commit = "latest:main"'; } >> pack.toml
+          pack fetch
+
+      - name: Switch collection
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: pack switch ${{ matrix.variant.mode == 'bleeding-edge-compiler' && 'HEAD' || 'latest' }}
+
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.PROJECT_DIR }}/${{ env.BUILD_DIR }}
+          key: ${{ matrix.variant.cache_key }}
+
+      - name: Refresh cached file timestamps
+        if: steps.cache.outputs.cache-hit == 'true'
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          find "$BUILD_DIR" -type f -exec touch {} +
+          sync
+
+      - name: Build ${{ needs.get-upstream-matrix.outputs.package }}
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
+        run: pack build "$PACKAGE"
+
+      - name: Save build cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.PROJECT_DIR }}/${{ env.BUILD_DIR }}
+          key: ${{ matrix.variant.cache_key }}
+
+      - name: Test ${{ needs.get-upstream-matrix.outputs.package }}
+        if: ${{ inputs.run_tests }}
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
+        run: pack test "$PACKAGE"
