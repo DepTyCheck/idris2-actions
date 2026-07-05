@@ -18,6 +18,11 @@ on:
         required: false
         type: boolean
         default: true
+      enable_cache:
+        description: Tar the pack state and build dir after testing and upload them as artifacts to restore pack state in other jobs.
+        required: false
+        type: boolean
+        default: true
     outputs:
       variants:
         description: JSON array of { mode, cache_key } for each built variant.
@@ -82,8 +87,9 @@ jobs:
                 ipkg="${root_ipkgs[0]}"
                 ;;
               *)
-                ipkg="${root_ipkgs[0]}"
-                echo "warning: multiple .ipkg in root, using $ipkg"
+                echo "error: multiple .ipkg found in repo root; set ipkg_path to pick one:"
+                printf '  %s\n' "${root_ipkgs[@]}"
+                exit 1
                 ;;
             esac
           fi
@@ -181,12 +187,31 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: pack switch ${{ matrix.variant.mode == 'bleeding-edge-compiler' && 'HEAD' || 'latest' }}
 
+      - name: Install dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
+        run: pack install-deps "$PACKAGE"
+
+      - name: Fold the pack state into the cache key
+        env:
+          BASE_CACHE_KEY: ${{ matrix.variant.cache_key }}
+        run: |
+          state_dir="${PACK_STATE_DIR:-$HOME/.local/state/pack}"
+
+          # | xargs -0 sha256sum | is skipped to avoid hashing the content of the pack state
+          pack_hash=$(find "$state_dir" -print0 2>/dev/null \
+            | sort -z | sha256sum | cut -c1-16)
+
+          echo "Pack state hash: $pack_hash"
+          echo "CACHE_KEY=$BASE_CACHE_KEY-$pack_hash" >> "$GITHUB_ENV"
+
       - name: Restore build cache
         id: cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.PROJECT_DIR }}/${{ env.BUILD_DIR }}
-          key: ${{ matrix.variant.cache_key }}
+          key: ${{ env.CACHE_KEY }}
 
       - name: Refresh cached file timestamps
         if: steps.cache.outputs.cache-hit == 'true'
@@ -206,7 +231,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ env.PROJECT_DIR }}/${{ env.BUILD_DIR }}
-          key: ${{ matrix.variant.cache_key }}
+          key: ${{ env.CACHE_KEY }}
 
       - name: Test ${{ needs.get-upstream-matrix.outputs.package }}
         if: ${{ inputs.run_tests }}
@@ -214,3 +239,29 @@ jobs:
         env:
           PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
         run: pack test "$PACKAGE"
+
+      - name: Tar the pack state and build dir
+        if: ${{ inputs.enable_cache }}
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
+        run: |
+          # Pack dir list from https://github.com/buzden/deptycheck/blob/a1a6b5777f52d8ece7e004708b2db53fd737af2e/.github/tar-pack
+          # A single archive holds the pack folders plus the project's build dir, all with absolute paths.
+          # Named per package so several packages can be built in one workflow.
+          paths=("$PWD/$BUILD_DIR")
+          for d in "${PACK_USER_DIR:-$HOME/.config/pack}" \
+                   "${PACK_STATE_DIR:-$HOME/.local/state/pack}" \
+                   "${PACK_CACHE_DIR:-$HOME/.cache/pack}" \
+                   "${PACK_BIN_DIR:-$HOME/.local/bin}"; do
+            [ -d "$d" ] && paths+=("$d")
+          done
+
+          tar -cf "$GITHUB_WORKSPACE/pack-$PACKAGE.tar" --exclude=.git "${paths[@]}"
+
+      - name: Upload pack state and build dir
+        if: ${{ inputs.enable_cache }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pack-state-${{ needs.get-upstream-matrix.outputs.package }}-${{ matrix.variant.mode }}
+          path: pack-${{ needs.get-upstream-matrix.outputs.package }}.tar
