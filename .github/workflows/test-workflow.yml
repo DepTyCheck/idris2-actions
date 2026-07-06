@@ -80,4 +80,42 @@ jobs:
         env:
           PACKAGE: ${{ needs.build-root-for-cache.outputs.package }}
         run: pack run "$PACKAGE"
+
+      - name: Upload the single-variant pack state
+        uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@master
+        with:
+          package: ${{ needs.build-root-for-cache.outputs.package }}
+          mode: ${{ fromJSON(needs.build-root-for-cache.outputs.variants)[0].mode }}
+          suffix: single-variant
+          project_dir: ${{ needs.build-root-for-cache.outputs.project_dir }}
+          build_dir: ${{ needs.build-root-for-cache.outputs.build_dir }}
+  # jscpd:ignore-end
+
+  # Restore the custom state uploaded by run-root-single-variant.
+  # jscpd:ignore-start
+  run-root-custom-state:
+    needs:
+      - build-root-for-cache
+      - run-root-single-variant
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Restore the custom single-variant state
+        uses: DepTyCheck/idris2-actions/.github/actions/restore-cache@master
+        with:
+          package: ${{ needs.build-root-for-cache.outputs.package }}
+          mode: ${{ fromJSON(needs.build-root-for-cache.outputs.variants)[0].mode }}
+          suffix: single-variant
+          project_dir: ${{ needs.build-root-for-cache.outputs.project_dir }}
+
+      - name: Run the package from the custom state
+        working-directory: ${{ needs.build-root-for-cache.outputs.project_dir }}
+        env:
+          PACKAGE: ${{ needs.build-root-for-cache.outputs.package }}
+        run: pack run "$PACKAGE"
   # jscpd:ignore-end
