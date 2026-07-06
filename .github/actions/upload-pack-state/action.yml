@@ -1,0 +1,54 @@
+name: Upload Idris2 pack state
+description: >-
+  Tar all pack folders and upload it as an artifact.
+  Pair it with the restore-cache action in a later job.
+  Call this after your own pack setup/build to publish the state downstream.
+
+inputs:
+  package:
+    description: The package name; used for the archive and artifact names. Must match the restore-cache call.
+    required: true
+  mode:
+    description: Variant label disambiguating the artifact (e.g. latest-pack-collection). Must match the restore-cache call.
+    required: true
+  suffix:
+    description: Optional extra label appended to the artifact name. Must match the restore-cache call.
+    required: false
+    default: ""
+  project_dir:
+    description: Directory holding the .ipkg and pack.toml.
+    required: false
+    default: .
+  build_dir:
+    description: The package's build dir, relative to project_dir.
+    required: false
+    default: build
+
+runs:
+  using: composite
+  steps:
+    - name: Tar the pack state and build dir
+      shell: bash
+      working-directory: ${{ inputs.project_dir }}
+      env:
+        PACKAGE: ${{ inputs.package }}
+        BUILD_DIR: ${{ inputs.build_dir }}
+      run: |
+        # Copied from https://github.com/buzden/deptycheck/blob/a1a6b5777f52d8ece7e004708b2db53fd737af2e/.github/tar-pack
+        # A single archive holds the pack folders plus the project's build dir, all with absolute paths.
+        # Named per package so several packages can be uploaded in one workflow.
+        paths=("$PWD/$BUILD_DIR")
+        for d in "${PACK_USER_DIR:-$HOME/.config/pack}" \
+                 "${PACK_STATE_DIR:-$HOME/.local/state/pack}" \
+                 "${PACK_CACHE_DIR:-$HOME/.cache/pack}" \
+                 "${PACK_BIN_DIR:-$HOME/.local/bin}"; do
+          [ -d "$d" ] && paths+=("$d")
+        done
+
+        tar -cf "$GITHUB_WORKSPACE/pack-$PACKAGE.tar" --exclude=.git "${paths[@]}"
+
+    - name: Upload pack state and build dir
+      uses: actions/upload-artifact@v7
+      with:
+        name: pack-state-${{ inputs.package }}-${{ inputs.mode }}${{ inputs.suffix != '' && format('-{0}', inputs.suffix) || '' }}
+        path: pack-${{ inputs.package }}.tar

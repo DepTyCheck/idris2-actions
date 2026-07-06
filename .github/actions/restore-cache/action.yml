@@ -12,6 +12,10 @@ inputs:
   mode:
     description: Variant mode (`latest-pack-collection` or `bleeding-edge-compiler`).
     required: true
+  suffix:
+    description: Optional extra label that was appended to the artifact name by upload-pack-state. Must match the upload call.
+    required: false
+    default: ""
   project_dir:
     description: Directory holding the .ipkg and pack.toml (the `project_dir` workflow output).
     required: false
@@ -23,7 +27,7 @@ runs:
     - name: Download the packed build
       uses: actions/download-artifact@v7
       with:
-        name: pack-state-${{ inputs.package }}-${{ inputs.mode }}
+        name: pack-state-${{ inputs.package }}-${{ inputs.mode }}${{ inputs.suffix != '' && format('-{0}', inputs.suffix) || '' }}
 
     - name: Recreate the bleeding-edge pack.toml entry
       if: inputs.mode == 'bleeding-edge-compiler'
