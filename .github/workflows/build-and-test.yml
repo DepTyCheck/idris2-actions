@@ -32,6 +32,9 @@ on:
       collections:
         description: JSON array of pack collection names.
         value: ${{ jobs.get-upstream-matrix.outputs.collections }}
+      pack_states:
+        description: JSON array of restore handles, one per pack collection.
+        value: ${{ jobs.get-upstream-matrix.outputs.pack_states }}
       package:
         description: The package name parsed from the .ipkg.
         value: ${{ jobs.get-upstream-matrix.outputs.package }}
@@ -60,6 +63,7 @@ jobs:
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
     outputs:
       collections: ${{ steps.matrix.outputs.collections }}
+      pack_states: ${{ steps.matrix.outputs.pack_states }}
       package: ${{ steps.matrix.outputs.package }}
       project_dir: ${{ steps.matrix.outputs.project_dir }}
       build_dir: ${{ steps.matrix.outputs.build_dir }}
@@ -154,13 +158,16 @@ jobs:
             collections='["latest","HEAD"]'
           fi
 
+          pack_states=$(printf '%s' "$collections" | sed "s/\"\([^\"]*\)\"/\"pack-state-$PACKAGE-\1\"/g")
           echo "Collections: $collections"
+          echo "Pack states: $pack_states"
 
           {
             echo "package=$PACKAGE"
             echo "project_dir=$PROJECT_DIR"
             echo "build_dir=$BUILD_DIR"
             echo "collections=$collections"
+            echo "pack_states=$pack_states"
             echo "hash=$HASH"
             echo "current=$current"
             echo "upstream=$upstream"
@@ -200,7 +207,9 @@ jobs:
 
       - name: Switch collection
         working-directory: ${{ env.PROJECT_DIR }}
-        run: pack switch ${{ matrix.collection }}
+        env:
+          COLLECTION: ${{ matrix.collection }}
+        run: pack switch "$COLLECTION"
 
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}
@@ -208,22 +217,30 @@ jobs:
           PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
         run: pack install-deps "$PACKAGE"
 
+      - name: Calculate effective pack collection
+        uses: DepTyCheck/idris2-actions/.github/actions/effective-pack-collection@v1
+        with:
+          collection: ${{ matrix.collection }}
+
       - name: Fold the pack state into the cache key
         env:
           COLLECTION: ${{ matrix.collection }}
         run: |
+          # Build cache key like build-<hash>-latest-<current-version>-<deps-hash>
+
           case "$COLLECTION" in
             latest) collection_version="$CURRENT" ;;
             HEAD) collection_version="$UPSTREAM" ;;
             *) collection_version="$COLLECTION" ;;
           esac
 
-          base_cache_key="build-$HASH-$COLLECTION-$collection_version"
-          state_dir="${PACK_STATE_DIR:-$HOME/.local/state/pack}"
+          base_cache_key="build-$HASH-$COLLECTION"
+          if [ "$collection_version" != "$COLLECTION" ]; then
+            base_cache_key="$base_cache_key-$collection_version"
+          fi
 
-          # | xargs -0 sha256sum | is skipped to avoid hashing the content of the pack state
-          pack_hash=$(find "$state_dir" -print0 2>/dev/null \
-            | sort -z | sha256sum | cut -c1-16)
+          echo "Dependency hash input: $PACK_COLLECTION_DB"
+          pack_hash=$(sha256sum "$PACK_COLLECTION_DB" | cut -c1-16)
 
           echo "Pack state hash: $pack_hash"
           echo "CACHE_KEY=$base_cache_key-$pack_hash" >> "$GITHUB_ENV"
@@ -264,9 +281,9 @@ jobs:
 
       - name: Upload pack state and build dir
         if: ${{ inputs.enable_cache }}
-        uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@master
+        uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@v1
         with:
           package: ${{ needs.get-upstream-matrix.outputs.package }}
-          mode: ${{ matrix.collection }}
+          collection: ${{ matrix.collection }}
           project_dir: ${{ env.PROJECT_DIR }}
           build_dir: ${{ env.BUILD_DIR }}

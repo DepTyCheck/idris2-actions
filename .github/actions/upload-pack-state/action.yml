@@ -8,7 +8,7 @@ inputs:
   package:
     description: The package name; used for the artifact name and exposed as an output for restore-pack-state.
     required: true
-  mode:
+  collection:
     description: Pack collection disambiguating the artifact (e.g. latest or HEAD).
     required: true
   label:
@@ -37,15 +37,18 @@ runs:
       shell: bash
       env:
         PACKAGE: ${{ inputs.package }}
-        MODE: ${{ inputs.mode }}
+        COLLECTION: ${{ inputs.collection }}
         LABEL: ${{ inputs.label }}
       run: |
-        state="pack-state-$PACKAGE-$MODE"
+        state="pack-state-$PACKAGE-$COLLECTION"
         if [ -n "$LABEL" ]; then
           state="$state-$LABEL"
         fi
 
         echo "state=$state" >> "$GITHUB_OUTPUT"
+
+    - run: sleep 2 # avoid such error during next step. tar: /root/.cache/pack: file changed as we read it
+      shell: bash
 
     - name: Tar the pack state and build dir
       shell: bash

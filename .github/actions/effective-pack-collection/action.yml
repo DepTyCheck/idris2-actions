@@ -1,0 +1,43 @@
+name: Calculate effective pack collection
+description: >-
+  Resolve the effective pack collection name and its DB path.
+
+inputs:
+  collection:
+    description: Requested pack collection (e.g. nightly-** or latest or HEAD).
+    required: true
+
+outputs:
+  effective_collection:
+    description: Effective pack collection name
+    value: ${{ steps.calc.outputs.effective_collection }}
+  pack_collection_db:
+    description: Path to the effective collection's DB toml under the pack state dir.
+    value: ${{ steps.calc.outputs.pack_collection_db }}
+
+runs:
+  using: composite
+  steps:
+    - name: Calculate effective pack collection
+      id: calc
+      shell: bash
+      env:
+        COLLECTION: ${{ inputs.collection }}
+      run: |
+        state_dir="${PACK_STATE_DIR:-$HOME/.local/state/pack}"
+        effective_collection=$(sed -n 's/^[[:space:]]*collection[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$state_dir/pack.toml" | tail -n 1)
+        effective_collection="${effective_collection:-$COLLECTION}"
+        collection_db="$state_dir/db/$effective_collection.toml"
+
+        echo "Effective pack collection: $effective_collection"
+        echo "Pack collection DB: $collection_db"
+
+        {
+          echo "effective_collection=$effective_collection"
+          echo "pack_collection_db=$collection_db"
+        } >> "$GITHUB_OUTPUT"
+
+        {
+          echo "EFFECTIVE_COLLECTION=$effective_collection"
+          echo "PACK_COLLECTION_DB=$collection_db"
+        } >> "$GITHUB_ENV"

@@ -53,13 +53,13 @@ jobs:
 
 The workflow exposes outputs so a downstream job can restore the build it cached.
 
-
-| Output        | Description                                                                |
-| ------------- | -------------------------------------------------------------------------- |
-| `collections` | JSON array of pack collection names.                                       |
-| `package`     | Package name parsed from the `.ipkg`.                                      |
-| `project_dir` | Directory holding the `.ipkg` and `pack.toml`.                             |
-| `build_dir`   | The package's build dir (relative to `project_dir`).                       |
+| Output        | Description                                             |
+| ------------- | ------------------------------------------------------- |
+| `collections` | JSON array of pack collection names.                    |
+| `pack_states` | JSON array of restore handles, one per pack collection. |
+| `package`     | Package name parsed from the `.ipkg`.                   |
+| `project_dir` | Directory holding the `.ipkg` and `pack.toml`.          |
+| `build_dir`   | The package's build dir (relative to `project_dir`).    |
 
 ## Restoring pack state
 
@@ -78,7 +78,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        collection: ${{ fromJSON(needs.build-for-cache.outputs.collections) }}
+        state: ${{ fromJSON(needs.build-for-cache.outputs.pack_states) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -89,7 +89,7 @@ jobs:
         id: restore
         uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
         with:
-          state: pack-state-${{ needs.build-for-cache.outputs.package }}-${{ matrix.collection }}
+          state: ${{ matrix.state }}
 
       - name: Run the package
         working-directory: ${{ needs.build-for-cache.outputs.project_dir }}
@@ -120,7 +120,7 @@ jobs:
         id: restore
         uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
         with:
-          state: pack-state-${{ needs.build.outputs.package }}-${{ fromJSON(needs.build.outputs.collections)[0] }}
+          state: ${{ fromJSON(needs.build.outputs.pack_states)[0] }}
 
       - name: Run the package
         working-directory: ${{ needs.build.outputs.project_dir }}
@@ -153,7 +153,7 @@ jobs:
         uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@v1
         with:
           package: my-package
-          mode: latest
+          collection: latest
 
   use-pack-state:
     # 3. Declare build job as dependency
