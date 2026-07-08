@@ -13,6 +13,11 @@ on:
         required: false
         type: string
         default: latest
+      pack_collections:
+        description: JSON array of pack collections to build, e.g. ["latest"] or ["latest", "HEAD"]. Empty array keeps the automatic latest/HEAD selection.
+        required: false
+        type: string
+        default: "[]"
       run_tests:
         description: Run `pack test` after building. Set false to only build and cache.
         required: false
@@ -25,7 +30,7 @@ on:
         default: true
     outputs:
       collections:
-        description: JSON array of { name, state } for each pack collection.
+        description: JSON array of pack collection names.
         value: ${{ jobs.get-upstream-matrix.outputs.collections }}
       package:
         description: The package name parsed from the .ipkg.
@@ -55,10 +60,12 @@ jobs:
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
     outputs:
       collections: ${{ steps.matrix.outputs.collections }}
-      build_collections: ${{ steps.matrix.outputs.build_collections }}
       package: ${{ steps.matrix.outputs.package }}
       project_dir: ${{ steps.matrix.outputs.project_dir }}
       build_dir: ${{ steps.matrix.outputs.build_dir }}
+      hash: ${{ steps.matrix.outputs.hash }}
+      current: ${{ steps.matrix.outputs.current }}
+      upstream: ${{ steps.matrix.outputs.upstream }}
     steps:
       - name: Install git
         run: apt-get update && apt-get install -y git
@@ -132,27 +139,21 @@ jobs:
 
       - name: Compute build collections
         id: matrix
+        env:
+          PACK_COLLECTIONS: ${{ inputs.pack_collections }}
         run: |
           current=$(idris2 --version | sed 's/.*-//')
           upstream=$(git ls-remote https://github.com/idris-lang/Idris2 main | head -c 9)
           echo "Current: $current, bleeding edge: $upstream"
 
-          build_collection() {
-            printf '{"name":"%s","cache_key":"build-%s-%s-%s","state":"pack-state-%s-%s"}' "$1" "$HASH" "$1" "$2" "$PACKAGE" "$1"
-          }
-          public_collection() {
-            printf '{"name":"%s","state":"pack-state-%s-%s"}' "$1" "$PACKAGE" "$1"
-          }
-
-          latest=$(build_collection latest "$current")
-          public_latest=$(public_collection latest)
-          if [ "$current" = "$upstream" ]; then
-            build_collections="[$latest]"
-            collections="[$public_latest]"
+          if [ "$PACK_COLLECTIONS" != "[]" ]; then
+            collections="$PACK_COLLECTIONS"
+          elif [ "$current" = "$upstream" ]; then
+            collections='["latest"]'
           else
-            build_collections="[$latest, $(build_collection HEAD "$upstream")]"
-            collections="[$public_latest, $(public_collection HEAD)]"
+            collections='["latest","HEAD"]'
           fi
+
           echo "Collections: $collections"
 
           {
@@ -160,21 +161,26 @@ jobs:
             echo "project_dir=$PROJECT_DIR"
             echo "build_dir=$BUILD_DIR"
             echo "collections=$collections"
-            echo "build_collections=$build_collections"
+            echo "hash=$HASH"
+            echo "current=$current"
+            echo "upstream=$upstream"
           } >> "$GITHUB_OUTPUT"
 
   build-and-test:
-    name: Build & test ${{ needs.get-upstream-matrix.outputs.package }} (${{ matrix.collection.name }})
+    name: Build & test ${{ needs.get-upstream-matrix.outputs.package }} (${{ matrix.collection }})
     needs: get-upstream-matrix
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
     env:
       PROJECT_DIR: ${{ needs.get-upstream-matrix.outputs.project_dir }}
       BUILD_DIR: ${{ needs.get-upstream-matrix.outputs.build_dir }}
+      HASH: ${{ needs.get-upstream-matrix.outputs.hash }}
+      CURRENT: ${{ needs.get-upstream-matrix.outputs.current }}
+      UPSTREAM: ${{ needs.get-upstream-matrix.outputs.upstream }}
     strategy:
       fail-fast: false
       matrix:
-        collection: ${{ fromJSON(needs.get-upstream-matrix.outputs.build_collections) }}
+        collection: ${{ fromJSON(needs.get-upstream-matrix.outputs.collections) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -186,7 +192,7 @@ jobs:
         run: pack update-db
 
       - name: Switch to the bleeding edge compiler
-        if: matrix.collection.name == 'HEAD'
+        if: matrix.collection == 'HEAD'
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           { echo; echo "[idris2]"; echo 'commit = "latest:main"'; } >> pack.toml
@@ -194,7 +200,7 @@ jobs:
 
       - name: Switch collection
         working-directory: ${{ env.PROJECT_DIR }}
-        run: pack switch ${{ matrix.collection.name }}
+        run: pack switch ${{ matrix.collection }}
 
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}
@@ -204,8 +210,15 @@ jobs:
 
       - name: Fold the pack state into the cache key
         env:
-          BASE_CACHE_KEY: ${{ matrix.collection.cache_key }}
+          COLLECTION: ${{ matrix.collection }}
         run: |
+          case "$COLLECTION" in
+            latest) collection_version="$CURRENT" ;;
+            HEAD) collection_version="$UPSTREAM" ;;
+            *) collection_version="$COLLECTION" ;;
+          esac
+
+          base_cache_key="build-$HASH-$COLLECTION-$collection_version"
           state_dir="${PACK_STATE_DIR:-$HOME/.local/state/pack}"
 
           # | xargs -0 sha256sum | is skipped to avoid hashing the content of the pack state
@@ -213,7 +226,7 @@ jobs:
             | sort -z | sha256sum | cut -c1-16)
 
           echo "Pack state hash: $pack_hash"
-          echo "CACHE_KEY=$BASE_CACHE_KEY-$pack_hash" >> "$GITHUB_ENV"
+          echo "CACHE_KEY=$base_cache_key-$pack_hash" >> "$GITHUB_ENV"
 
       - name: Restore build cache
         id: cache
@@ -254,6 +267,6 @@ jobs:
         uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@master
         with:
           package: ${{ needs.get-upstream-matrix.outputs.package }}
-          mode: ${{ matrix.collection.name }}
+          mode: ${{ matrix.collection }}
           project_dir: ${{ env.PROJECT_DIR }}
           build_dir: ${{ env.BUILD_DIR }}

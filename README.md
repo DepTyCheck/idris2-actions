@@ -41,6 +41,10 @@ jobs:
       # Optional. Default: latest. Tag for the ghcr.io/stefan-hoeck/idris2-pack container.
       # container_tag: latest
 
+      # Optional. Default: []. JSON array of pack collections to build.
+      # Empty array keeps the automatic latest/HEAD selection.
+      # pack_collections: '["latest"]'
+
       # Optional. Default: true. Run `pack test` after building. Set false to only build and cache.
       # run_tests: true
 ```
@@ -52,7 +56,7 @@ The workflow exposes outputs so a downstream job can restore the build it cached
 
 | Output        | Description                                                                |
 | ------------- | -------------------------------------------------------------------------- |
-| `collections` | JSON array of `{ name, state }`, one entry per pack collection.            |
+| `collections` | JSON array of pack collection names.                                       |
 | `package`     | Package name parsed from the `.ipkg`.                                      |
 | `project_dir` | Directory holding the `.ipkg` and `pack.toml`.                             |
 | `build_dir`   | The package's build dir (relative to `project_dir`).                       |
@@ -85,7 +89,7 @@ jobs:
         id: restore
         uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
         with:
-          state: ${{ matrix.collection.state }}
+          state: pack-state-${{ needs.build-for-cache.outputs.package }}-${{ matrix.collection }}
 
       - name: Run the package
         working-directory: ${{ needs.build-for-cache.outputs.project_dir }}
@@ -95,7 +99,7 @@ jobs:
 ## Using a single collection
 
 Sometimes you just want one build and to run a command against it.
-The `collections` array is ordered: element 0 is always `latest` (the `HEAD` entry, when present, is element 1).
+With the automatic selection, the `collections` array is ordered: element 0 is always `latest` (the `HEAD` entry, when present, is element 1).
 So pick that collection by index and use a single job without a matrix.
 
 ```yaml
@@ -116,7 +120,7 @@ jobs:
         id: restore
         uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
         with:
-          state: ${{ fromJSON(needs.build.outputs.collections)[0].state }}
+          state: pack-state-${{ needs.build.outputs.package }}-${{ fromJSON(needs.build.outputs.collections)[0] }}
 
       - name: Run the package
         working-directory: ${{ needs.build.outputs.project_dir }}
