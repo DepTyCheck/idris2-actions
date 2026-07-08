@@ -1,0 +1,26 @@
+name: Restore Idris2 pack state
+description: >-
+  Downloads the uploaded artifact containing the pack state, build dir and pack.toml,
+  and untars it into place, so you can run your own `pack test`/`pack run` against the restored build.
+
+inputs:
+  state:
+    description: Restore handle emitted by upload-pack-state (`steps.<id>.outputs.state`).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download the packed build
+      uses: actions/download-artifact@v7
+      with:
+        name: ${{ inputs.state }}
+
+    - name: Untar the pack state and build dir
+      shell: bash
+      env:
+        STATE: ${{ inputs.state }}
+      run: |
+        # Everything was tarred with absolute paths.
+        # `--touch` sets mtimes to now, so no need to refresh build timestamps.
+        tar -xf "$GITHUB_WORKSPACE/$STATE.tar" --one-top-level=/ --touch

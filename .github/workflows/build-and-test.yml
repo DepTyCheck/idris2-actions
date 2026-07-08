@@ -24,9 +24,9 @@ on:
         type: boolean
         default: true
     outputs:
-      variants:
-        description: JSON array of { mode, cache_key } for each built variant.
-        value: ${{ jobs.get-upstream-matrix.outputs.variants }}
+      collections:
+        description: JSON array of { name, state } for each pack collection.
+        value: ${{ jobs.get-upstream-matrix.outputs.collections }}
       package:
         description: The package name parsed from the .ipkg.
         value: ${{ jobs.get-upstream-matrix.outputs.package }}
@@ -50,11 +50,12 @@ defaults:
 
 jobs:
   get-upstream-matrix:
-    name: Acquire matrix of upstream modes
+    name: Acquire matrix of pack collections
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
     outputs:
-      variants: ${{ steps.matrix.outputs.variants }}
+      collections: ${{ steps.matrix.outputs.collections }}
+      build_collections: ${{ steps.matrix.outputs.build_collections }}
       package: ${{ steps.matrix.outputs.package }}
       project_dir: ${{ steps.matrix.outputs.project_dir }}
       build_dir: ${{ steps.matrix.outputs.build_dir }}
@@ -129,33 +130,41 @@ jobs:
           echo "Source hash: $hash"
           echo "HASH=$hash" >> "$GITHUB_ENV"
 
-      - name: Compute build variants
+      - name: Compute build collections
         id: matrix
         run: |
           current=$(idris2 --version | sed 's/.*-//')
           upstream=$(git ls-remote https://github.com/idris-lang/Idris2 main | head -c 9)
           echo "Current: $current, bleeding edge: $upstream"
 
-          variant() {
-            printf '{"mode":"%s","cache_key":"build-%s-%s-%s"}' "$1" "$HASH" "$1" "$2"
+          build_collection() {
+            printf '{"name":"%s","cache_key":"build-%s-%s-%s","state":"pack-state-%s-%s"}' "$1" "$HASH" "$1" "$2" "$PACKAGE" "$1"
           }
-          latest=$(variant latest-pack-collection "$current")
+          public_collection() {
+            printf '{"name":"%s","state":"pack-state-%s-%s"}' "$1" "$PACKAGE" "$1"
+          }
+
+          latest=$(build_collection latest "$current")
+          public_latest=$(public_collection latest)
           if [ "$current" = "$upstream" ]; then
-            variants="[$latest]"
+            build_collections="[$latest]"
+            collections="[$public_latest]"
           else
-            variants="[$latest, $(variant bleeding-edge-compiler "$upstream")]"
+            build_collections="[$latest, $(build_collection HEAD "$upstream")]"
+            collections="[$public_latest, $(public_collection HEAD)]"
           fi
-          echo "Variants: $variants"
+          echo "Collections: $collections"
 
           {
             echo "package=$PACKAGE"
             echo "project_dir=$PROJECT_DIR"
             echo "build_dir=$BUILD_DIR"
-            echo "variants=$variants"
+            echo "collections=$collections"
+            echo "build_collections=$build_collections"
           } >> "$GITHUB_OUTPUT"
 
   build-and-test:
-    name: Build & test ${{ needs.get-upstream-matrix.outputs.package }} (${{ matrix.variant.mode }})
+    name: Build & test ${{ needs.get-upstream-matrix.outputs.package }} (${{ matrix.collection.name }})
     needs: get-upstream-matrix
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
@@ -165,7 +174,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: ${{ fromJSON(needs.get-upstream-matrix.outputs.variants) }}
+        collection: ${{ fromJSON(needs.get-upstream-matrix.outputs.build_collections) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -177,7 +186,7 @@ jobs:
         run: pack update-db
 
       - name: Switch to the bleeding edge compiler
-        if: matrix.variant.mode == 'bleeding-edge-compiler'
+        if: matrix.collection.name == 'HEAD'
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           { echo; echo "[idris2]"; echo 'commit = "latest:main"'; } >> pack.toml
@@ -185,7 +194,7 @@ jobs:
 
       - name: Switch collection
         working-directory: ${{ env.PROJECT_DIR }}
-        run: pack switch ${{ matrix.variant.mode == 'bleeding-edge-compiler' && 'HEAD' || 'latest' }}
+        run: pack switch ${{ matrix.collection.name }}
 
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}
@@ -195,7 +204,7 @@ jobs:
 
       - name: Fold the pack state into the cache key
         env:
-          BASE_CACHE_KEY: ${{ matrix.variant.cache_key }}
+          BASE_CACHE_KEY: ${{ matrix.collection.cache_key }}
         run: |
           state_dir="${PACK_STATE_DIR:-$HOME/.local/state/pack}"
 
@@ -245,6 +254,6 @@ jobs:
         uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@master
         with:
           package: ${{ needs.get-upstream-matrix.outputs.package }}
-          mode: ${{ matrix.variant.mode }}
+          mode: ${{ matrix.collection.name }}
           project_dir: ${{ env.PROJECT_DIR }}
           build_dir: ${{ env.BUILD_DIR }}

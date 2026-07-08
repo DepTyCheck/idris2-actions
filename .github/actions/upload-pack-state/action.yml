@@ -1,18 +1,18 @@
 name: Upload Idris2 pack state
 description: >-
   Tar all pack folders and upload it as an artifact.
-  Pair it with the restore-cache action in a later job.
+  Pair it with the restore-pack-state action in a later job.
   Call this after your own pack setup/build to publish the state downstream.
 
 inputs:
   package:
-    description: The package name; used for the archive and artifact names. Must match the restore-cache call.
+    description: The package name; used for the artifact name and exposed as an output for restore-pack-state.
     required: true
   mode:
-    description: Variant label disambiguating the artifact (e.g. latest-pack-collection). Must match the restore-cache call.
+    description: Pack collection disambiguating the artifact (e.g. latest or HEAD).
     required: true
-  suffix:
-    description: Optional extra label appended to the artifact name. Must match the restore-cache call.
+  label:
+    description: Optional extra label appended to the artifact name.
     required: false
     default: ""
   project_dir:
@@ -24,20 +24,41 @@ inputs:
     required: false
     default: build
 
+outputs:
+  state:
+    description: Restore handle to pass to restore-pack-state.
+    value: ${{ steps.describe.outputs.state }}
+
 runs:
   using: composite
   steps:
+    - name: Describe the uploaded pack state
+      id: describe
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        MODE: ${{ inputs.mode }}
+        LABEL: ${{ inputs.label }}
+      run: |
+        state="pack-state-$PACKAGE-$MODE"
+        if [ -n "$LABEL" ]; then
+          state="$state-$LABEL"
+        fi
+
+        echo "state=$state" >> "$GITHUB_OUTPUT"
+
     - name: Tar the pack state and build dir
       shell: bash
       working-directory: ${{ inputs.project_dir }}
       env:
-        PACKAGE: ${{ inputs.package }}
         BUILD_DIR: ${{ inputs.build_dir }}
+        STATE: ${{ steps.describe.outputs.state }}
       run: |
         # Copied from https://github.com/buzden/deptycheck/blob/a1a6b5777f52d8ece7e004708b2db53fd737af2e/.github/tar-pack
-        # A single archive holds the pack folders plus the project's build dir, all with absolute paths.
-        # Named per package so several packages can be uploaded in one workflow.
+        # A single archive holds the pack folders plus the project's build dir and pack.toml, all with absolute paths.
+        # Named per package, collection and label, so several artifacts can be uploaded in one workflow.
         paths=("$PWD/$BUILD_DIR")
+        [ -f "$PWD/pack.toml" ] && paths+=("$PWD/pack.toml")
         for d in "${PACK_USER_DIR:-$HOME/.config/pack}" \
                  "${PACK_STATE_DIR:-$HOME/.local/state/pack}" \
                  "${PACK_CACHE_DIR:-$HOME/.cache/pack}" \
@@ -45,10 +66,10 @@ runs:
           [ -d "$d" ] && paths+=("$d")
         done
 
-        tar -cf "$GITHUB_WORKSPACE/pack-$PACKAGE.tar" --exclude=.git "${paths[@]}"
+        tar -cf "$GITHUB_WORKSPACE/$STATE.tar" --exclude=.git "${paths[@]}"
 
     - name: Upload pack state and build dir
       uses: actions/upload-artifact@v7
       with:
-        name: pack-state-${{ inputs.package }}-${{ inputs.mode }}${{ inputs.suffix != '' && format('-{0}', inputs.suffix) || '' }}
-        path: pack-${{ inputs.package }}.tar
+        name: ${{ steps.describe.outputs.state }}
+        path: ${{ steps.describe.outputs.state }}.tar

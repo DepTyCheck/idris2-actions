@@ -3,8 +3,8 @@
 A reusable GitHub Actions workflow that builds and tests any
 [pack](https://github.com/stefan-hoeck/idris2-pack)-managed Idris2 project.
 
-It runs `pack build` and `pack test` against both the latest pack collection and the bleeding-edge Idris2 compiler
-(the bleeding-edge run is skipped automatically when it matches the version from latest pack collection).
+It runs `pack build` and `pack test` against both the `latest` and `HEAD` pack collections
+(the `HEAD` run is skipped automatically when it matches the compiler version from the `latest` collection).
 
 ## Usage
 
@@ -47,19 +47,20 @@ jobs:
 
 ## Outputs
 
-The workflow exposes outputs so a downstream job can restore the build it cached:
+The workflow exposes outputs so a downstream job can restore the build it cached.
 
-| Output        | Description                                                       |
-| ------------- | ----------------------------------------------------------------- |
-| `variants`    | JSON array of `{ mode, cache_key }`, one entry per built variant. |
-| `package`     | Package name parsed from the `.ipkg`.                             |
-| `project_dir` | Directory holding the `.ipkg` and `pack.toml`.                    |
-| `build_dir`   | The package's build dir (relative to `project_dir`).              |
 
-## Restoring a cached build
+| Output        | Description                                                                |
+| ------------- | -------------------------------------------------------------------------- |
+| `collections` | JSON array of `{ name, state }`, one entry per pack collection.            |
+| `package`     | Package name parsed from the `.ipkg`.                                      |
+| `project_dir` | Directory holding the `.ipkg` and `pack.toml`.                             |
+| `build_dir`   | The package's build dir (relative to `project_dir`).                       |
 
-The build job caches project build per variant.
-A downstream job can restore that cache with the `restore-cache` action and use the build.
+## Restoring pack state
+
+The build job caches project build per collection.
+A downstream job can restore that pack state with the `restore-pack-state` action and use the build.
 
 ```yaml
 jobs:
@@ -73,7 +74,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: ${{ fromJSON(needs.build-for-cache.outputs.variants) }}
+        collection: ${{ fromJSON(needs.build-for-cache.outputs.collections) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -82,23 +83,20 @@ jobs:
 
       - name: Restore the cached build
         id: restore
-        uses: DepTyCheck/idris2-actions/.github/actions/restore-cache@v1
+        uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
         with:
-          mode: ${{ matrix.variant.mode }}
-          cache_key: ${{ matrix.variant.cache_key }}
-          project_dir: ${{ needs.build-for-cache.outputs.project_dir }}
-          build_dir: ${{ needs.build-for-cache.outputs.build_dir }}
+          state: ${{ matrix.collection.state }}
 
       - name: Run the package
         working-directory: ${{ needs.build-for-cache.outputs.project_dir }}
         run: pack run ${{ needs.build-for-cache.outputs.package }}
 ```
 
-## Using a single variant
+## Using a single collection
 
 Sometimes you just want one build and to run a command against it.
-The `variants` array is ordered: element 0 is always `latest-pack-collection` (the `bleeding-edge-compiler` entry, when present, is element 1).
-So pick that variant by index and use a single job without a matrix.
+The `collections` array is ordered: element 0 is always `latest` (the `HEAD` entry, when present, is element 1).
+So pick that collection by index and use a single job without a matrix.
 
 ```yaml
 jobs:
@@ -114,18 +112,61 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Restore the latest-pack-collection build
+      - name: Restore the latest collection build
         id: restore
-        uses: DepTyCheck/idris2-actions/.github/actions/restore-cache@v1
+        uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
         with:
-          mode: ${{ fromJSON(needs.build.outputs.variants)[0].mode }}
-          cache_key: ${{ fromJSON(needs.build.outputs.variants)[0].cache_key }}
-          project_dir: ${{ needs.build.outputs.project_dir }}
-          build_dir: ${{ needs.build.outputs.build_dir }}
+          state: ${{ fromJSON(needs.build.outputs.collections)[0].state }}
 
       - name: Run the package
         working-directory: ${{ needs.build.outputs.project_dir }}
         run: pack run ${{ needs.build.outputs.package }}
+```
+
+## Custom pack-state jobs
+
+If you build the package yourself, call `upload-pack-state` at the end of that job
+and expose its `state` output on the job. A later job can pass that single value to `restore-pack-state`.
+
+```yaml
+jobs:
+  build-pack-state:
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:latest
+    # 1. Expose the output
+    outputs:
+      state: ${{ steps.upload-pack-state.outputs.state }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - run: pack build my-package
+
+      # 2. Call upload action
+      - name: Upload pack state
+        id: upload-pack-state
+        uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@v1
+        with:
+          package: my-package
+          mode: latest
+
+  use-pack-state:
+    # 3. Declare build job as dependency
+    needs: build-pack-state
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # 4. Restore pack state using build job reference
+      - uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
+        with:
+          state: ${{ needs.build-pack-state.outputs.state }}
+
+      - run: pack run my-package
 ```
 
 ## Real examples
