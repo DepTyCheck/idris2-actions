@@ -3,6 +3,7 @@ name: Test workflow
 
 on:
   push:
+  workflow_dispatch:
   schedule:
     - cron: "0 1 * * *"
 
@@ -29,6 +30,13 @@ jobs:
   build-root-for-cache:
     uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
 
+  # Build root project with a hardcoded pack collection.
+  build-root-nightly-260407:
+    needs: build-root-for-cache # Avoid skipping due to concurrency settings
+    uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
+    with:
+      pack_collections: '["nightly-260407"]'
+
   run-root-cached:
     needs: build-root-for-cache
     runs-on: ubuntu-latest
@@ -36,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: ${{ fromJSON(needs.build-root-for-cache.outputs.variants) }}
+        state: ${{ fromJSON(needs.build-root-for-cache.outputs.pack_states) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -44,11 +52,9 @@ jobs:
           persist-credentials: false
 
       - name: Restore the cached build
-        uses: DepTyCheck/idris2-actions/.github/actions/restore-cache@master
+        uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@master
         with:
-          package: ${{ needs.build-root-for-cache.outputs.package }}
-          mode: ${{ matrix.variant.mode }}
-          project_dir: ${{ needs.build-root-for-cache.outputs.project_dir }}
+          state: ${{ matrix.state }}
 
       - name: Run the package
         working-directory: ${{ needs.build-root-for-cache.outputs.project_dir }}
@@ -56,24 +62,24 @@ jobs:
           PACKAGE: ${{ needs.build-root-for-cache.outputs.package }}
         run: pack run "$PACKAGE"
 
-  # Single-variant usage example. Intentionally mirrors run-root-cached, so ignore the near-duplicate block.
+  # Single-collection usage example. Intentionally mirrors run-root-cached, so ignore the near-duplicate block.
   # jscpd:ignore-start
-  run-root-single-variant:
+  run-root-single-collection:
     needs: build-root-for-cache
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:latest
+    outputs:
+      state: ${{ steps.upload-pack-state.outputs.state }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           persist-credentials: false
 
-      - name: Restore the first variant build
-        uses: DepTyCheck/idris2-actions/.github/actions/restore-cache@master
+      - name: Restore the first collection build
+        uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@master
         with:
-          package: ${{ needs.build-root-for-cache.outputs.package }}
-          mode: ${{ fromJSON(needs.build-root-for-cache.outputs.variants)[0].mode }}
-          project_dir: ${{ needs.build-root-for-cache.outputs.project_dir }}
+          state: ${{ fromJSON(needs.build-root-for-cache.outputs.pack_states)[0] }}
 
       - name: Run the package
         working-directory: ${{ needs.build-root-for-cache.outputs.project_dir }}
@@ -81,22 +87,23 @@ jobs:
           PACKAGE: ${{ needs.build-root-for-cache.outputs.package }}
         run: pack run "$PACKAGE"
 
-      - name: Upload the single-variant pack state
+      - name: Upload the single-collection pack state
+        id: upload-pack-state
         uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@master
         with:
           package: ${{ needs.build-root-for-cache.outputs.package }}
-          mode: ${{ fromJSON(needs.build-root-for-cache.outputs.variants)[0].mode }}
-          suffix: single-variant
+          collection: ${{ fromJSON(needs.build-root-for-cache.outputs.collections)[0] }}
+          label: single-collection
           project_dir: ${{ needs.build-root-for-cache.outputs.project_dir }}
           build_dir: ${{ needs.build-root-for-cache.outputs.build_dir }}
   # jscpd:ignore-end
 
-  # Restore the custom state uploaded by run-root-single-variant.
+  # Restore the custom state uploaded by run-root-single-collection.
   # jscpd:ignore-start
   run-root-custom-state:
     needs:
       - build-root-for-cache
-      - run-root-single-variant
+      - run-root-single-collection
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:latest
     steps:
@@ -105,13 +112,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Restore the custom single-variant state
-        uses: DepTyCheck/idris2-actions/.github/actions/restore-cache@master
+      - name: Restore the custom single-collection state
+        uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@master
         with:
-          package: ${{ needs.build-root-for-cache.outputs.package }}
-          mode: ${{ fromJSON(needs.build-root-for-cache.outputs.variants)[0].mode }}
-          suffix: single-variant
-          project_dir: ${{ needs.build-root-for-cache.outputs.project_dir }}
+          state: ${{ needs.run-root-single-collection.outputs.state }}
 
       - name: Run the package from the custom state
         working-directory: ${{ needs.build-root-for-cache.outputs.project_dir }}
