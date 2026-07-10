@@ -11,6 +11,59 @@ permissions:
   contents: read
 
 jobs:
+  # Test effective-pack-collection against several collections.
+  test-effective-pack-collection:
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        collection:
+          - HEAD
+          - latest
+          - nightly-260623
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Update pack database
+        run: pack update-db
+
+      - name: Switch to the bleeding edge compiler
+        if: matrix.collection == 'HEAD'
+        run: |
+          { echo; echo "[idris2]"; echo 'commit = "latest:main"'; } >> pack.toml
+          pack fetch
+
+      - name: Switch collection
+        env:
+          COLLECTION: ${{ matrix.collection }}
+        run: pack switch "$COLLECTION"
+
+      - name: Calculate effective pack collection
+        id: effective
+        uses: DepTyCheck/idris2-actions/.github/actions/effective-pack-collection@master
+        with:
+          collection: ${{ matrix.collection }}
+
+      - name: Check outputs are not empty
+        env:
+          EFFECTIVE_COLLECTION: ${{ steps.effective.outputs.effective_collection }}
+          PACK_COLLECTION_DB: ${{ steps.effective.outputs.pack_collection_db }}
+        run: |
+          if [ -z "$EFFECTIVE_COLLECTION" ]; then
+            echo "error: effective_collection output is empty"
+            exit 1
+          fi
+          if [ -z "$PACK_COLLECTION_DB" ]; then
+            echo "error: pack_collection_db output is empty"
+            exit 1
+          fi
+          echo "effective_collection=$EFFECTIVE_COLLECTION"
+          echo "pack_collection_db=$PACK_COLLECTION_DB"
+
   # Build test libs with different configs
   build-n-test:
     strategy:
