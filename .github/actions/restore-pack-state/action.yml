@@ -23,4 +23,4 @@ runs:
       run: |
         # Everything was tarred with absolute paths.
         # `--touch` sets mtimes to now, so no need to refresh build timestamps.
-        tar -xf "$GITHUB_WORKSPACE/$STATE.tar" --one-top-level=/ --touch
+        tar -xf "$GITHUB_WORKSPACE/$STATE.tar" -C / --touch
