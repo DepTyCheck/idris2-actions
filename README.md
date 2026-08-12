@@ -47,6 +47,12 @@ jobs:
 
       # Optional. Default: true. Run `pack test` after building. Set false to only build and cache.
       # run_tests: true
+
+      # Optional. Default: "". Space-separated pack libraries to `pack install` before `pack build`.
+      # pack_deps: ""
+
+      # Optional. Default: "". Space-separated pack libraries to `pack install` after `pack build`.
+      # pack_extras: ""
 ```
 
 ## Outputs

@@ -23,8 +23,18 @@ on:
         required: false
         type: boolean
         default: true
+      pack_deps:
+        description: Space-separated pack libraries to `pack install` before `pack build`.
+        required: false
+        type: string
+        default: ""
+      pack_extras:
+        description: Space-separated pack libraries to `pack install` after `pack build`.
+        required: false
+        type: string
+        default: ""
       enable_cache:
-        description: Tar the pack state and build dir after testing and upload them as artifacts to restore pack state in other jobs.
+        description: Tar the pack state and build dir after building and upload them as artifacts to restore pack state in other jobs.
         required: false
         type: boolean
         default: true
@@ -58,7 +68,7 @@ defaults:
 
 jobs:
   get-upstream-matrix:
-    name: Acquire matrix of pack collections
+    name: Prepare pack states
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
     outputs:
@@ -173,8 +183,8 @@ jobs:
             echo "upstream=$upstream"
           } >> "$GITHUB_OUTPUT"
 
-  build-and-test:
-    name: Build & test ${{ needs.get-upstream-matrix.outputs.package }} (${{ matrix.collection }})
+  build:
+    name: Build ${{ needs.get-upstream-matrix.outputs.package }} (${{ matrix.collection }})
     needs: get-upstream-matrix
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
@@ -222,7 +232,7 @@ jobs:
         with:
           collection: ${{ matrix.collection }}
 
-      - name: Fold the pack state into the cache key
+      - name: Compute cache key with pack state
         env:
           COLLECTION: ${{ matrix.collection }}
         run: |
@@ -259,11 +269,29 @@ jobs:
           find "$BUILD_DIR" -type f -exec touch {} +
           sync
 
+      - name: Install pack deps
+        if: ${{ inputs.pack_deps != '' }}
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          PACK_DEPS: ${{ inputs.pack_deps }}
+        run: |
+          # shellcheck disable=SC2086 # intentional word splitting of space-separated libs
+          pack install $PACK_DEPS
+
       - name: Build ${{ needs.get-upstream-matrix.outputs.package }}
         working-directory: ${{ env.PROJECT_DIR }}
         env:
           PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
         run: pack build "$PACKAGE"
+
+      - name: Install pack extras
+        if: ${{ inputs.pack_extras != '' }}
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          PACK_EXTRAS: ${{ inputs.pack_extras }}
+        run: |
+          # shellcheck disable=SC2086 # intentional word splitting of space-separated libs
+          pack install $PACK_EXTRAS
 
       - name: Save build cache
         if: steps.cache.outputs.cache-hit != 'true'
@@ -272,18 +300,40 @@ jobs:
           path: ${{ env.PROJECT_DIR }}/${{ env.BUILD_DIR }}
           key: ${{ env.CACHE_KEY }}
 
-      - name: Test ${{ needs.get-upstream-matrix.outputs.package }}
-        if: ${{ inputs.run_tests }}
-        working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
-        run: pack test "$PACKAGE"
-
       - name: Upload pack state and build dir
-        if: ${{ inputs.enable_cache }}
+        if: ${{ inputs.enable_cache || inputs.run_tests }}
         uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@v1
         with:
           package: ${{ needs.get-upstream-matrix.outputs.package }}
           collection: ${{ matrix.collection }}
           project_dir: ${{ env.PROJECT_DIR }}
           build_dir: ${{ env.BUILD_DIR }}
+
+  test:
+    name: Test ${{ needs.get-upstream-matrix.outputs.package }} (${{ matrix.collection }})
+    needs: [get-upstream-matrix, build]
+    if: ${{ inputs.run_tests }}
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
+    # jscpd:ignore-start
+    strategy:
+      fail-fast: false
+      matrix:
+        collection: ${{ fromJSON(needs.get-upstream-matrix.outputs.collections) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # jscpd:ignore-end
+
+      - name: Restore the cached build
+        uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
+        with:
+          state: pack-state-${{ needs.get-upstream-matrix.outputs.package }}-${{ matrix.collection }}
+
+      - name: Test ${{ needs.get-upstream-matrix.outputs.package }}
+        working-directory: ${{ needs.get-upstream-matrix.outputs.project_dir }}
+        env:
+          PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
+        run: pack test "$PACKAGE"
