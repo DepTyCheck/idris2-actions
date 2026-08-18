@@ -47,9 +47,6 @@ runs:
 
         echo "state=$state" >> "$GITHUB_OUTPUT"
 
-    - run: sleep 2 # avoid such error during next step. tar: /root/.cache/pack: file changed as we read it
-      shell: bash
-
     - name: Tar the pack state and build dir
       shell: bash
       working-directory: ${{ inputs.project_dir }}
@@ -60,6 +57,17 @@ runs:
         # Copied from https://github.com/buzden/deptycheck/blob/a1a6b5777f52d8ece7e004708b2db53fd737af2e/.github/tar-pack
         # A single archive holds the pack folders plus the project's build dir and pack.toml, all with absolute paths.
         # Named per package, collection and label, so several artifacts can be uploaded in one workflow.
+        #
+        # GNU tar exit 1 means some files changed while being archived, ignore it. Exit 2+ is fatal.
+        TAR="$(which tar)"
+        tar() {
+          "$TAR" "$@"
+          local exitcode="$?"
+          if [ "$exitcode" != 0 ] && [ "$exitcode" != 1 ]; then
+            exit "$exitcode"
+          fi
+        }
+
         paths=("$PWD/$BUILD_DIR")
         [ -f "$PWD/pack.toml" ] && paths+=("$PWD/pack.toml")
         for d in "${PACK_USER_DIR:-$HOME/.config/pack}" \
