@@ -33,6 +33,16 @@ on:
         required: false
         type: string
         default: ""
+      pre_build:
+        description: Bash script to run before `pack build`.
+        required: false
+        type: string
+        default: ""
+      pre_test:
+        description: Bash script to run before `pack test`.
+        required: false
+        type: string
+        default: ""
       enable_cache:
         description: Tar the pack state and build dir after building and upload them as artifacts to restore pack state in other jobs.
         required: false
@@ -278,6 +288,13 @@ jobs:
           # shellcheck disable=SC2086 # intentional word splitting of space-separated libs
           pack install $PACK_DEPS
 
+      - name: Run pre-build script
+        if: ${{ inputs.pre_build != '' }}
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          PRE_BUILD: ${{ inputs.pre_build }}
+        run: bash -euo pipefail -c "$PRE_BUILD"
+
       - name: Build ${{ needs.get-upstream-matrix.outputs.package }}
         working-directory: ${{ env.PROJECT_DIR }}
         env:
@@ -331,6 +348,13 @@ jobs:
         uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
         with:
           state: pack-state-${{ needs.get-upstream-matrix.outputs.package }}-${{ matrix.collection }}
+
+      - name: Run pre-test script
+        if: ${{ inputs.pre_test != '' }}
+        working-directory: ${{ needs.get-upstream-matrix.outputs.project_dir }}
+        env:
+          PRE_TEST: ${{ inputs.pre_test }}
+        run: bash -euo pipefail -c "$PRE_TEST"
 
       - name: Test ${{ needs.get-upstream-matrix.outputs.package }}
         working-directory: ${{ needs.get-upstream-matrix.outputs.project_dir }}

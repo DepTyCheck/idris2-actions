@@ -53,6 +53,12 @@ jobs:
 
       # Optional. Default: "". Space-separated pack libraries to `pack install` after `pack build`.
       # pack_extras: ""
+
+      # Optional. Default: "". Bash script to run before `pack build`.
+      # pre_build: ""
+
+      # Optional. Default: "". Bash script to run before `pack test`.
+      # pre_test: ""
 ```
 
 ## Outputs
