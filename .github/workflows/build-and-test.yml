@@ -198,6 +198,10 @@ jobs:
     needs: get-upstream-matrix
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
+    outputs: # Pass the upstream values down to the test step
+      package: ${{ needs.get-upstream-matrix.outputs.package }}
+      collections: ${{ needs.get-upstream-matrix.outputs.collections }}
+      project_dir: ${{ needs.get-upstream-matrix.outputs.project_dir }}
     env:
       PROJECT_DIR: ${{ needs.get-upstream-matrix.outputs.project_dir }}
       BUILD_DIR: ${{ needs.get-upstream-matrix.outputs.build_dir }}
@@ -327,8 +331,8 @@ jobs:
           build_dir: ${{ env.BUILD_DIR }}
 
   test:
-    name: Test ${{ needs.get-upstream-matrix.outputs.package }} (${{ matrix.collection }})
-    needs: [get-upstream-matrix, build]
+    name: Test ${{ needs.build.outputs.package }} (${{ matrix.collection }})
+    needs: build
     if: ${{ inputs.run_tests }}
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
@@ -336,7 +340,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        collection: ${{ fromJSON(needs.get-upstream-matrix.outputs.collections) }}
+        collection: ${{ fromJSON(needs.build.outputs.collections) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -347,17 +351,17 @@ jobs:
       - name: Restore the cached build
         uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
         with:
-          state: pack-state-${{ needs.get-upstream-matrix.outputs.package }}-${{ matrix.collection }}
+          state: pack-state-${{ needs.build.outputs.package }}-${{ matrix.collection }}
 
       - name: Run pre-test script
         if: ${{ inputs.pre_test != '' }}
-        working-directory: ${{ needs.get-upstream-matrix.outputs.project_dir }}
+        working-directory: ${{ needs.build.outputs.project_dir }}
         env:
           PRE_TEST: ${{ inputs.pre_test }}
         run: bash -euo pipefail -c "$PRE_TEST"
 
-      - name: Test ${{ needs.get-upstream-matrix.outputs.package }}
-        working-directory: ${{ needs.get-upstream-matrix.outputs.project_dir }}
+      - name: Test ${{ needs.build.outputs.package }}
+        working-directory: ${{ needs.build.outputs.project_dir }}
         env:
-          PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
+          PACKAGE: ${{ needs.build.outputs.package }}
         run: pack test "$PACKAGE"
