@@ -61,8 +61,10 @@ runs:
         # GNU tar exit 1 means some files changed while being archived, ignore it. Exit 2+ is fatal.
         TAR="$(which tar)"
         tar() {
+          set +e  # turn off errexit temporarily
           "$TAR" "$@"
           local exitcode="$?"
+          set -e
           if [ "$exitcode" != 0 ] && [ "$exitcode" != 1 ]; then
             exit "$exitcode"
           fi
