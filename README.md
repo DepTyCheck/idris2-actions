@@ -65,13 +65,14 @@ jobs:
 
 The workflow exposes outputs so a downstream job can restore the build it cached.
 
-| Output        | Description                                             |
-| ------------- | ------------------------------------------------------- |
-| `collections` | JSON array of pack collection names.                    |
-| `pack_states` | JSON array of restore handles, one per pack collection. |
-| `package`     | Package name parsed from the `.ipkg`.                   |
-| `project_dir` | Directory holding the `.ipkg` and `pack.toml`.          |
-| `build_dir`   | The package's build dir (relative to `project_dir`).    |
+| Output        | Description                                                                  |
+| ------------- | ---------------------------------------------------------------------------- |
+| `collections` | JSON array of pack collection names.                                         |
+| `pack_states` | JSON array of restore handles, one per pack collection.                      |
+| `pack_state`  | First restore handle from `pack_states`, or empty if `pack_states` is empty. |
+| `package`     | Package name parsed from the `.ipkg`.                                        |
+| `project_dir` | Directory holding the `.ipkg` and `pack.toml`.                               |
+| `build_dir`   | The package's build dir (relative to `project_dir`).                         |
 
 ## Restoring pack state
 
@@ -111,8 +112,8 @@ jobs:
 ## Using a single collection
 
 Sometimes you just want one build and to run a command against it.
-With the automatic selection, the `collections` array is ordered: element 0 is always `latest` (the `HEAD` entry, when present, is element 1).
-So pick that collection by index and use a single job without a matrix.
+By default the `collections` array is ordered: element 0 is always `latest` (the `HEAD` entry, when present, is element 1).
+So pick the state by index and use a single job without a matrix.
 
 ```yaml
 jobs:
@@ -128,11 +129,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Restore the latest collection build
-        id: restore
+      # Basic way to restore
+      - name: Restore the latest collection build using index
         uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
         with:
           state: ${{ fromJSON(needs.build.outputs.pack_states)[0] }}
+
+      # Beautiful way to restore first pack state
+      - name: Restore the latest collection build using pack_state
+        uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
+        with:
+          state: ${{ needs.build.outputs.pack_state }} # pack_state is an alias for pack_states[0]
 
       - name: Run the package
         working-directory: ${{ needs.build.outputs.project_dir }}
@@ -187,4 +194,7 @@ jobs:
 
 ## Real examples
 
-Todo. idris2-summary-stat, DepTyCheck, verilog-model and more...
+- Trivial usage: [buzden/idris2-summary-stat](https://github.com/buzden/idris2-summary-stat)
+- Advanced usage:
+  - [buzden/deptycheck](https://github.com/buzden/deptycheck) — custom test runs and installation of extra libs into the pack environment
+  - [DepTyCheck/verilog-model](https://github.com/DepTyCheck/verilog-model) — advanced usage of the results of `pack run`
