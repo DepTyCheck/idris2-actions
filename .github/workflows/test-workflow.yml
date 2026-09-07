@@ -115,6 +115,26 @@ jobs:
           PACKAGE: ${{ needs.build-root-for-cache.outputs.package }}
         run: pack run "$PACKAGE"
 
+  # pack_state must equal pack_states[0]
+  check-pack-state-output:
+    needs: build-root-for-cache
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert pack_state matches pack_states[0]
+        env:
+          PACK_STATE: ${{ needs.build-root-for-cache.outputs.pack_state }}
+          EXPECTED: ${{ fromJSON(needs.build-root-for-cache.outputs.pack_states)[0] }}
+        run: |
+          if [ -z "$PACK_STATE" ]; then
+            echo "error: pack_state is empty"
+            exit 1
+          fi
+          if [ "$PACK_STATE" != "$EXPECTED" ]; then
+            echo "error: pack_state='$PACK_STATE' != pack_states[0]='$EXPECTED'"
+            exit 1
+          fi
+          echo "pack_state=$PACK_STATE"
+
   # Single-collection usage example. Intentionally mirrors run-root-cached, so ignore the near-duplicate block.
   # jscpd:ignore-start
   run-root-single-collection:
