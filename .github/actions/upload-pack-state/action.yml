@@ -79,7 +79,7 @@ runs:
           [ -d "$d" ] && paths+=("$d")
         done
 
-        tar -cf "$GITHUB_WORKSPACE/$STATE.tar" --exclude=.git "${paths[@]}"
+        tar -cf "$GITHUB_WORKSPACE/$STATE.tar" --exclude=".git" --exclude="git" "${paths[@]}"
 
     - name: Upload pack state and build dir
       uses: actions/upload-artifact@v7
