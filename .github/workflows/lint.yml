@@ -7,16 +7,35 @@ on:
 
 permissions:
   contents: read
-  statuses: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  test-workflow:
+    name: Test workflow scripts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y yq
+          python3 -m venv .venv
+          .venv/bin/python -m pip install PyYAML
+      - name: Run workflow tests
+        run: .venv/bin/python -m unittest discover -s tests -v
+
   lint:
     name: Lint code base
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      statuses: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -29,3 +48,8 @@ jobs:
         uses: super-linter/super-linter/slim@v8
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHON_BLACK_CONFIG_FILE: pyproject.toml
+          PYTHON_ISORT_CONFIG_FILE: pyproject.toml
+          PYTHON_PYLINT_CONFIG_FILE: pyproject.toml
+          PYTHON_RUFF_CONFIG_FILE: pyproject.toml
+          PYTHON_RUFF_FORMAT_CONFIG_FILE: pyproject.toml
