@@ -6,6 +6,20 @@ A reusable GitHub Actions workflow that builds and tests any
 It runs `pack build` and `pack test` against both the `latest` and `HEAD` pack collections
 (the `HEAD` run is skipped automatically when it matches the compiler version from the `latest` collection).
 
+## Custom compiler
+
+The workflow reads `pack.toml` beside the selected `.ipkg`.
+To use a compiler fork or a specific commit, add:
+
+```toml
+[idris2]
+url = "https://github.com/..."
+commit = "..."
+```
+
+A local `idris2.url` or `idris2.commit` override selects only `latest` by default.
+Explicit `pack_collections` are used as supplied, but including `HEAD` together with a custom compiler is an error.
+
 ## Usage
 
 Add a workflow to your repository (for example `.github/workflows/ci.yml`) that calls it:
@@ -76,7 +90,7 @@ The workflow exposes outputs so a downstream job can restore the build it cached
 
 ## Restoring pack state
 
-The build job caches project build per collection.
+The build job caches the project build and pack state together per collection.
 A downstream job can restore that pack state with the `restore-pack-state` action and use the build.
 
 ```yaml
@@ -191,6 +205,19 @@ jobs:
 
       - run: pack run my-package
 ```
+
+## Development
+
+Install `jq` and `tomlq`, then:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+./scripts/format.sh
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+Linter configs live in `.github/linters`.
 
 ## Real examples
 

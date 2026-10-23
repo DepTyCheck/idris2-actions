@@ -92,11 +92,11 @@ jobs:
       project_dir: ${{ steps.matrix.outputs.project_dir }}
       build_dir: ${{ steps.matrix.outputs.build_dir }}
       hash: ${{ steps.matrix.outputs.hash }}
-      current: ${{ steps.matrix.outputs.current }}
       upstream: ${{ steps.matrix.outputs.upstream }}
+      compiler_hash: ${{ steps.matrix.outputs.compiler_hash }}
     steps:
-      - name: Install git
-        run: apt-get update && apt-get install -y git
+      - name: Install git and TOML parser
+        run: apt-get update && apt-get install -y git yq
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -159,7 +159,10 @@ jobs:
         run: |
           # Hash of the package's sources
           # from https://stackoverflow.com/q/545387
-          hash=$(find "$PROJECT_DIR/src" "$IPKG" "$PROJECT_DIR/pack.toml" -type f -print0 2>/dev/null \
+          paths=("$IPKG")
+          [ ! -d "$PROJECT_DIR/src" ] || paths+=("$PROJECT_DIR/src")
+          [ ! -f "$PROJECT_DIR/pack.toml" ] || paths+=("$PROJECT_DIR/pack.toml")
+          hash=$(find "${paths[@]}" -type f -print0 \
             | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
 
           echo "Source hash: $hash"
@@ -170,25 +173,41 @@ jobs:
         env:
           PACK_COLLECTIONS: ${{ inputs.pack_collections }}
         run: |
-          current=$(idris2 --version | sed 's/.*-//')
-          upstream=$(git ls-remote https://github.com/idris-lang/Idris2 main | head -c 9)
-          echo "Current: $current, bleeding edge: $upstream"
+          custom_compiler=false
+          compiler_hash=""
+          if [ -f "$PROJECT_DIR/pack.toml" ]; then
+            custom_compiler=$(tomlq -r '(.idris2 // {}) | has("url") or has("commit")' "$PROJECT_DIR/pack.toml")
+          fi
+          if [ "$custom_compiler" = true ]; then
+            compiler_hash=$(tomlq -c '[.idris2.url // "", .idris2.commit // ""]' "$PROJECT_DIR/pack.toml" | sha256sum | cut -c1-16)
+          fi
+          collections=$(jq -c . <<< "$PACK_COLLECTIONS")
 
-          if [ "$PACK_COLLECTIONS" != "[]" ]; then
-            collections="$PACK_COLLECTIONS"
-          elif [ "$current" = "$upstream" ]; then
-            collections='["latest"]'
-          else
-            collections='["latest","HEAD"]'
+          upstream=""
+          if [ "$custom_compiler" = true ] && jq -e 'index("HEAD") != null' <<< "$collections" > /dev/null; then
+            echo "error: HEAD cannot be combined with a custom compiler in pack.toml" >&2
+            exit 1
           fi
 
-          pack_states=$(printf '%s' "$collections" | sed "s/\"\([^\"]*\)\"/\"pack-state-$PACKAGE-\1\"/g")
-          # First element of pack_states, or empty if the array is empty.
-          pack_state=$(printf '%s' "$pack_states" | sed -n 's/^\["\([^"]*\)".*/\1/p')
-          echo "Collections: $collections"
-          echo "Pack states: $pack_states"
-          echo "Pack state: $pack_state"
+          if [ "$collections" != '[]' ]; then
+            echo "Using requested collections: $collections"
+          elif [ "$custom_compiler" = true ]; then
+            collections='["latest"]'
+          else
+            current=$(idris2 --version | sed 's/.*-//')
+            upstream=$(git ls-remote https://github.com/idris-lang/Idris2 main | cut -c1-9)
+            echo "Current: $current, bleeding edge: $upstream"
+            if [ "$current" = "$upstream" ]; then
+              collections='["latest"]'
+            else
+              collections='["latest","HEAD"]'
+            fi
+          fi
 
+          pack_states=$(jq -c --arg package "$PACKAGE" 'map("pack-state-" + $package + "-" + .)' <<< "$collections")
+          pack_state=$(jq -r '.[0]' <<< "$pack_states")
+          echo "Collections: $collections; custom compiler: $custom_compiler"
+          echo "Pack states: $pack_states"
           {
             echo "package=$PACKAGE"
             echo "project_dir=$PROJECT_DIR"
@@ -197,8 +216,8 @@ jobs:
             echo "pack_states=$pack_states"
             echo "pack_state=$pack_state"
             echo "hash=$HASH"
-            echo "current=$current"
             echo "upstream=$upstream"
+            echo "compiler_hash=$compiler_hash"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -214,8 +233,8 @@ jobs:
       PROJECT_DIR: ${{ needs.get-upstream-matrix.outputs.project_dir }}
       BUILD_DIR: ${{ needs.get-upstream-matrix.outputs.build_dir }}
       HASH: ${{ needs.get-upstream-matrix.outputs.hash }}
-      CURRENT: ${{ needs.get-upstream-matrix.outputs.current }}
       UPSTREAM: ${{ needs.get-upstream-matrix.outputs.upstream }}
+      COMPILER_HASH: ${{ needs.get-upstream-matrix.outputs.compiler_hash }}
     strategy:
       fail-fast: false
       matrix:
@@ -226,9 +245,55 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve pack directories
+        run: |
+          {
+            echo "PACK_USER_DIR=${PACK_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pack}"
+            echo "PACK_STATE_DIR=${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}"
+            echo "PACK_CACHE_DIR=${PACK_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pack}"
+            echo "PACK_BIN_DIR=${PACK_BIN_DIR:-$HOME/.local/bin}"
+          } >> "$GITHUB_ENV"
+
       - name: Update pack database
         working-directory: ${{ env.PROJECT_DIR }}
         run: pack update-db
+
+      - name: Compute cache key with pack state
+        id: cache-key
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          COLLECTION: ${{ matrix.collection }}
+          CONTAINER_TAG: ${{ inputs.container_tag }}
+        run: |
+          effective_collection="$COLLECTION"
+          if [ "$COLLECTION" = latest ]; then
+            # Match pack's latestCollection without installing a compiler.
+            effective_collection=$(find "$PACK_STATE_DIR/db" -maxdepth 1 -name '*.toml' ! -name HEAD.toml -exec basename {} .toml \; | LC_ALL=C sort | tail -n 1)
+            effective_collection="${effective_collection:-HEAD}"
+          fi
+          collection_db="$PACK_STATE_DIR/db/$effective_collection.toml"
+          pack_hash=$(sha256sum "$collection_db" | cut -c1-16)
+          compiler_version=""
+          if [ "$COLLECTION" = HEAD ]; then
+            compiler_version="${UPSTREAM:-$(git ls-remote https://github.com/idris-lang/Idris2 main | cut -c1-9)}"
+          fi
+          {
+            echo "EFFECTIVE_COLLECTION=$effective_collection"
+            echo "PACK_COLLECTION_DB=$collection_db"
+            echo "CACHE_KEY=build-state-v2-$CONTAINER_TAG-$HASH-$COLLECTION-$effective_collection-$pack_hash${compiler_version:+-$compiler_version}${COMPILER_HASH:+-$COMPILER_HASH}"
+          } >> "$GITHUB_ENV"
+          {
+            echo 'cache_paths<<EOF'
+            printf '%s\n' "$PWD/$BUILD_DIR" "$PACK_USER_DIR" "$PACK_STATE_DIR" "$PACK_CACHE_DIR" "$PACK_BIN_DIR"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ steps.cache-key.outputs.cache_paths }}
+          key: ${{ env.CACHE_KEY }}
 
       - name: Switch to the bleeding edge compiler
         if: matrix.collection == 'HEAD'
@@ -239,50 +304,13 @@ jobs:
 
       - name: Switch collection
         working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          COLLECTION: ${{ matrix.collection }}
-        run: pack switch "$COLLECTION"
+        run: pack switch "$EFFECTIVE_COLLECTION"
 
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}
         env:
           PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
         run: pack install-deps "$PACKAGE"
-
-      - name: Calculate effective pack collection
-        uses: DepTyCheck/idris2-actions/.github/actions/effective-pack-collection@v1
-        with:
-          collection: ${{ matrix.collection }}
-
-      - name: Compute cache key with pack state
-        env:
-          COLLECTION: ${{ matrix.collection }}
-        run: |
-          # Build cache key like build-<hash>-latest-<current-version>-<deps-hash>
-
-          case "$COLLECTION" in
-            latest) collection_version="$CURRENT" ;;
-            HEAD) collection_version="$UPSTREAM" ;;
-            *) collection_version="$COLLECTION" ;;
-          esac
-
-          base_cache_key="build-$HASH-$COLLECTION"
-          if [ "$collection_version" != "$COLLECTION" ]; then
-            base_cache_key="$base_cache_key-$collection_version"
-          fi
-
-          echo "Dependency hash input: $PACK_COLLECTION_DB"
-          pack_hash=$(sha256sum "$PACK_COLLECTION_DB" | cut -c1-16)
-
-          echo "Pack state hash: $pack_hash"
-          echo "CACHE_KEY=$base_cache_key-$pack_hash" >> "$GITHUB_ENV"
-
-      - name: Restore build cache
-        id: cache
-        uses: actions/cache/restore@v5
-        with:
-          path: ${{ env.PROJECT_DIR }}/${{ env.BUILD_DIR }}
-          key: ${{ env.CACHE_KEY }}
 
       - name: Refresh cached file timestamps
         if: steps.cache.outputs.cache-hit == 'true'
@@ -326,7 +354,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
-          path: ${{ env.PROJECT_DIR }}/${{ env.BUILD_DIR }}
+          path: ${{ steps.cache-key.outputs.cache_paths }}
           key: ${{ env.CACHE_KEY }}
 
       - name: Upload pack state and build dir

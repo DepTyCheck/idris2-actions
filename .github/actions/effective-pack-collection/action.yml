@@ -24,7 +24,7 @@ runs:
       env:
         COLLECTION: ${{ inputs.collection }}
       run: |
-        state_dir="${PACK_STATE_DIR:-$HOME/.local/state/pack}"
+        state_dir="${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}"
         effective_collection=$(sed -n 's/^[[:space:]]*collection[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$state_dir/pack.toml" | tail -n 1)
         effective_collection="${effective_collection:-$COLLECTION}"
         collection_db="$state_dir/db/$effective_collection.toml"

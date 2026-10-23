@@ -1,0 +1,18 @@
+[tool.black]
+line-length = 152
+
+[tool.isort]
+profile = "black"
+line_length = 152
+
+[tool.pylint.basic]
+no-docstring-rgx = "^(test_|setUp$)"
+
+[tool.pylint.format]
+max-line-length = 152
+
+[tool.pylint.messages_control]
+disable = ["E0401"]
+
+[tool.ruff]
+line-length = 152
