@@ -1,0 +1,14 @@
+[idris2]
+url = "https://github.com/spcfox/Idris2"
+commit = "41b6b8904e6bc04e8103be424add995b7ae44143"
+
+[custom.all.test_custom_compiler]
+type = "local"
+path = "."
+ipkg = "test_custom_compiler.ipkg"
+test = "test/test.ipkg"
+
+[custom.all.test_custom_compiler-test]
+type = "local"
+path = "test"
+ipkg = "test.ipkg"
