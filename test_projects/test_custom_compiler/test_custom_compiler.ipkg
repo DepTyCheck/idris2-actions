@@ -1,0 +1,4 @@
+package test_custom_compiler
+version = 0.1.0
+modules = CustomCompiler
+sourcedir = "src"

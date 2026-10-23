@@ -79,6 +79,44 @@ jobs:
       # These only build & test
       enable_cache: false
 
+  build-custom-compiler-for-cache:
+    uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
+    with:
+      ipkg_path: test_projects/test_custom_compiler/test_custom_compiler.ipkg
+      run_tests: false
+
+  test-restored-custom-compiler:
+    needs: build-custom-compiler-for-cache
+    runs-on: ubuntu-latest
+    container: ghcr.io/stefan-hoeck/idris2-pack:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Restore custom compiler and build
+        uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@master
+        with:
+          state: ${{ needs.build-custom-compiler-for-cache.outputs.pack_state }}
+
+      - name: Test without rebuilding the compiler
+        shell: bash
+        working-directory: ${{ needs.build-custom-compiler-for-cache.outputs.project_dir }}
+        env:
+          PACKAGE: ${{ needs.build-custom-compiler-for-cache.outputs.package }}
+          COMPILER_COMMIT: 41b6b8904e6bc04e8103be424add995b7ae44143
+        run: |
+          mkdir -p "$RUNNER_TEMP/no-compiler-rebuild"
+          printf '#!/bin/sh\necho "error: cache restore attempted a compiler rebuild (make)" >&2\nexit 1\n' > "$RUNNER_TEMP/no-compiler-rebuild/make"
+          chmod +x "$RUNNER_TEMP/no-compiler-rebuild/make"
+          export PATH="$RUNNER_TEMP/no-compiler-rebuild:$PATH"
+
+          compiler=$(pack app-path idris2)
+          test -x "$compiler"
+          "$compiler" --version | grep -F "${COMPILER_COMMIT:0:9}"
+          pack test "$PACKAGE"
+
   # Build root project, restore it and run
   build-root-for-cache:
     uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master

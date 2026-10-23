@@ -1,0 +1,6 @@
+package test_custom_compiler-test
+version = 0.1.0
+depends = test_custom_compiler
+main = Main
+executable = "test_custom_compiler-test"
+sourcedir = "src"
