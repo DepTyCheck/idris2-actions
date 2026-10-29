@@ -18,6 +18,11 @@ on:
         required: false
         type: string
         default: "[]"
+      continue_on_error_collections:
+        description: JSON array of pack collections whose pre-build, pack build, pack-state require, pre-test, and pack test steps may fail without failing the job, e.g. ["HEAD"]. Empty array keeps every failure failing the run.
+        required: false
+        type: string
+        default: "[]"
       run_tests:
         description: Run `pack test` after building. Set false to only build and cache.
         required: false
@@ -43,7 +48,7 @@ on:
         required: false
         type: string
         default: ""
-      enable_cache:
+      upload_pack_state_artifacts:
         description: Tar the pack state and build dir after building and upload them as artifacts to restore pack state in other jobs.
         required: false
         type: boolean
@@ -336,13 +341,18 @@ jobs:
           pack install $PACK_DEPS
 
       - name: Run pre-build script
+        id: pre-build
         if: ${{ inputs.pre_build != '' }}
+        continue-on-error: ${{ contains(fromJSON(inputs.continue_on_error_collections), matrix.collection) }}
         working-directory: ${{ env.PROJECT_DIR }}
         env:
           PRE_BUILD: ${{ inputs.pre_build }}
         run: bash -euo pipefail -c "$PRE_BUILD"
 
       - name: Build ${{ needs.get-upstream-matrix.outputs.package }}
+        id: pack-build
+        if: ${{ steps.pre-build.outcome != 'failure' }}
+        continue-on-error: ${{ contains(fromJSON(inputs.continue_on_error_collections), matrix.collection) }}
         working-directory: ${{ env.PROJECT_DIR }}
         env:
           PACKAGE: ${{ needs.get-upstream-matrix.outputs.package }}
@@ -358,14 +368,14 @@ jobs:
           pack install $PACK_EXTRAS
 
       - name: Save build cache
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: ${{ steps.cache.outputs.cache-hit != 'true' && steps.pre-build.outcome != 'failure' && steps.pack-build.outcome != 'failure' }}
         uses: actions/cache/save@v5
         with:
           path: ${{ steps.cache-key.outputs.cache_paths }}
           key: ${{ env.CACHE_KEY }}
 
       - name: Upload pack state and build dir
-        if: ${{ inputs.enable_cache || inputs.run_tests }}
+        if: ${{ inputs.upload_pack_state_artifacts && steps.pre-build.outcome != 'failure' && steps.pack-build.outcome != 'failure' }}
         uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@v1
         with:
           package: ${{ needs.get-upstream-matrix.outputs.package }}
@@ -401,18 +411,21 @@ jobs:
 
       - name: Require a pack state from Build
         if: ${{ steps.restore.outcome != 'success' }}
+        continue-on-error: ${{ contains(fromJSON(inputs.continue_on_error_collections), matrix.collection) }}
         run: |
           echo "::error::The Build job for this pack state failed, so tests were skipped."
           exit 1
 
       - name: Run pre-test script
         if: ${{ inputs.pre_test != '' }}
+        continue-on-error: ${{ contains(fromJSON(inputs.continue_on_error_collections), matrix.collection) }}
         working-directory: ${{ needs.build.outputs.project_dir }}
         env:
           PRE_TEST: ${{ inputs.pre_test }}
         run: bash -euo pipefail -c "$PRE_TEST"
 
       - name: Test ${{ needs.build.outputs.package }}
+        continue-on-error: ${{ contains(fromJSON(inputs.continue_on_error_collections), matrix.collection) }}
         working-directory: ${{ needs.build.outputs.project_dir }}
         env:
           PACKAGE: ${{ needs.build.outputs.package }}

@@ -237,6 +237,46 @@ commit = "unrelated"
     def test_test_job_runs_after_a_failed_build_unless_cancelled(self):
         self.assertEqual(WORKFLOW["jobs"]["test"]["if"], "${{ !cancelled() && inputs.run_tests }}")
 
+    def test_continue_on_error_collections_is_opt_in_on_named_steps(self):
+        trigger = WORKFLOW.get("on", WORKFLOW.get(True))
+        inputs = trigger["workflow_call"]["inputs"]
+        pack = inputs["pack_collections"]
+        inp = inputs.get("continue_on_error_collections")
+        self.assertIsNotNone(inp)
+        self.assertEqual(inp["default"], "[]")
+        self.assertEqual(inp["type"], pack["type"])
+        self.assertEqual(inp.get("required"), pack.get("required"))
+        expr = "${{ contains(fromJSON(inputs.continue_on_error_collections), matrix.collection) }}"
+        for job, name in (
+            ("build", "Run pre-build script"),
+            ("build", "Build ${{ needs.get-upstream-matrix.outputs.package }}"),
+            ("test", "Require a pack state from Build"),
+            ("test", "Run pre-test script"),
+            ("test", "Test ${{ needs.build.outputs.package }}"),
+        ):
+            self.assertEqual(step(job, name).get("continue-on-error"), expr, name)
+        for job in ("build", "test"):
+            self.assertNotIn("continue-on-error", WORKFLOW["jobs"][job])
+        self.assertTrue(step("test", "Restore the cached build").get("continue-on-error"))
+        self.assertNotEqual(step("test", "Restore the cached build").get("continue-on-error"), expr)
+        for name in ("Save build cache", "Upload pack state and build dir"):
+            self.assertNotIn("continue-on-error", step("build", name))
+
+    def test_failed_pre_build_or_pack_build_skips_cache_and_upload(self):
+        self.assertEqual(step("build", "Run pre-build script").get("id"), "pre-build")
+        pack_build = step("build", "Build ${{ needs.get-upstream-matrix.outputs.package }}")
+        self.assertEqual(pack_build.get("id"), "pack-build")
+        self.assertEqual(pack_build.get("if"), "${{ steps.pre-build.outcome != 'failure' }}")
+        skip_failed = "steps.pre-build.outcome != 'failure' && steps.pack-build.outcome != 'failure'"
+        self.assertEqual(
+            step("build", "Save build cache")["if"],
+            "${{ steps.cache.outputs.cache-hit != 'true' && " + skip_failed + " }}",
+        )
+        self.assertEqual(
+            step("build", "Upload pack state and build dir")["if"],
+            "${{ inputs.upload_pack_state_artifacts && " + skip_failed + " }}",
+        )
+
     def test_missing_pack_state_fails_test_with_build_message(self):
         restore = step("test", "Restore the cached build")
         self.assertEqual(restore.get("id"), "restore")

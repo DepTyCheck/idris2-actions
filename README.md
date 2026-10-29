@@ -62,6 +62,11 @@ jobs:
       # Empty array keeps the automatic latest/HEAD selection.
       # pack_collections: '["latest"]'
 
+      # Optional. Default: []. JSON array of pack collections whose pre-build,
+      # pack build, pack-state require, pre-test, and pack test steps may fail
+      # without failing the job. Empty array keeps every failure failing the run.
+      # continue_on_error_collections: '["HEAD"]'
+
       # Optional. Default: true. Run `pack test` after building. Set false to only build and cache.
       # run_tests: true
 
@@ -76,6 +81,10 @@ jobs:
 
       # Optional. Default: "". Bash script to run before `pack test`.
       # pre_test: ""
+
+      # Optional. Default: true. Upload pack-state artifacts after building
+      # so other jobs can restore them.
+      # upload_pack_state_artifacts: true
 ```
 
 ## Outputs
