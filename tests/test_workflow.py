@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -117,6 +118,7 @@ class WorkflowTests(unittest.TestCase):
                 expected_state = f"pack-state-example-latest-{result['compiler_hash']}"
                 self.assertEqual(json.loads(result["pack_states"]), [expected_state])
                 self.assertEqual(result["pack_state"], expected_state)
+                self.assertEqual(json.loads(result["test_matrix"]), [{"collection": "latest", "state": expected_state}])
 
     def test_explicit_custom_collections(self):
         for requested in ('["latest","HEAD","nightly-example"]', '["HEAD"]'):
@@ -134,6 +136,13 @@ class WorkflowTests(unittest.TestCase):
             result = self.matrix(config)
             self.assertEqual(json.loads(result["collections"]), ["latest", "HEAD"])
             self.assertEqual(json.loads(result["pack_states"]), ["pack-state-example-latest", "pack-state-example-HEAD"])
+            self.assertEqual(
+                json.loads(result["test_matrix"]),
+                [
+                    {"collection": "latest", "state": "pack-state-example-latest"},
+                    {"collection": "HEAD", "state": "pack-state-example-HEAD"},
+                ],
+            )
         self.stub("git", 'echo "111111111abcdef refs/heads/main"')
         self.assertEqual(json.loads(self.matrix()["collections"]), ["latest"])
         self.assertEqual(json.loads(self.matrix(collections='["HEAD"]')["collections"]), ["HEAD"])
@@ -190,6 +199,10 @@ commit = "unrelated"
             json.loads(result["pack_states"]),
             [f"pack-state-example-{c}-{result['compiler_hash']}" for c in names],
         )
+        self.assertEqual(
+            json.loads(result["test_matrix"]),
+            [{"collection": c, "state": f"pack-state-example-{c}-{result['compiler_hash']}"} for c in names],
+        )
 
     def test_invalid_configuration_fails(self):
         for config in ("[idris2", "[idris2]\ncommit="):
@@ -210,12 +223,47 @@ commit = "unrelated"
             self.assertNotIn(key, WORKFLOW["jobs"]["get-upstream-matrix"]["outputs"])
         self.assertNotIn("CUSTOM_COMPILER", WORKFLOW["jobs"]["build"]["env"])
 
+    def test_build_and_test_job_names_share_package_and_collection(self):
+        def substring(job, prefix):
+            name = WORKFLOW["jobs"][job]["name"]
+            self.assertTrue(name.startswith(f"{prefix} "), name)
+            rest = name.removeprefix(f"{prefix} ")
+            return re.sub(r"\$\{\{ needs\.[^}]+\.outputs\.package \}\}", "package", rest)
+
+        shared = "package (${{ matrix.collection }})"
+        self.assertEqual(substring("build", "Build"), shared)
+        self.assertEqual(substring("test", "Test"), shared)
+
+    def test_test_job_runs_after_a_failed_build_unless_cancelled(self):
+        self.assertEqual(WORKFLOW["jobs"]["test"]["if"], "${{ !cancelled() && inputs.run_tests }}")
+
+    def test_missing_pack_state_fails_test_with_build_message(self):
+        restore = step("test", "Restore the cached build")
+        self.assertEqual(restore.get("id"), "restore")
+        self.assertTrue(restore.get("continue-on-error"))
+        names = [s.get("name") for s in WORKFLOW["jobs"]["test"]["steps"]]
+        self.assertIn("Require a pack state from Build", names)
+        require = step("test", "Require a pack state from Build")
+        self.assertEqual(require["if"], "${{ steps.restore.outcome != 'success' }}")
+        result = self.run_script(require["run"], False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("The Build job for this pack state failed, so tests were skipped.", result.stdout + result.stderr)
+        steps = WORKFLOW["jobs"]["test"]["steps"]
+        require_index = steps.index(require)
+        self.assertGreater(require_index, steps.index(restore))
+        self.assertGreater(steps.index(step("test", "Run pre-test script")), require_index)
+        self.assertGreater(steps.index(step("test", "Test ${{ needs.build.outputs.package }}")), require_index)
+
     def test_restore_uses_emitted_artifact_handles(self):
         self.assertEqual(step("build", "Upload pack state and build dir")["with"]["label"], "${{ env.COMPILER_HASH }}")
-        self.assertEqual(
-            WORKFLOW["jobs"]["test"]["strategy"]["matrix"]["state"],
-            "${{ fromJSON(needs.build.outputs.pack_states) }}",
-        )
+        outputs = WORKFLOW["jobs"]["build"]["outputs"]
+        self.assertEqual(outputs["test_matrix"], "${{ needs.get-upstream-matrix.outputs.test_matrix }}")
+        self.assertNotIn("collections", outputs)
+        self.assertNotIn("pack_states", outputs)
+        matrix = WORKFLOW["jobs"]["test"]["strategy"]["matrix"]
+        self.assertEqual(matrix["include"], "${{ fromJSON(needs.build.outputs.test_matrix) }}")
+        self.assertNotIn("collection", matrix)
+        self.assertNotIn("state", matrix)
         self.assertEqual(step("test", "Restore the cached build")["with"]["state"], "${{ matrix.state }}")
 
     def test_compiler_hash_uses_only_url_and_commit(self):

@@ -88,11 +88,16 @@ jobs:
       collections: ${{ steps.matrix.outputs.collections }}
       pack_states: ${{ steps.matrix.outputs.pack_states }}
       pack_state: ${{ steps.matrix.outputs.pack_state }}
+      # test_matrix includes two lists: pack states and collections.
+      # Collection is used only in the name; pack state is the cache key to upload and restore pack state
+      test_matrix: ${{ steps.matrix.outputs.test_matrix }}
       package: ${{ steps.matrix.outputs.package }}
       project_dir: ${{ steps.matrix.outputs.project_dir }}
       build_dir: ${{ steps.matrix.outputs.build_dir }}
+      # SHA-256 of the package sources: the .ipkg, src/ if it exists, and pack.toml if it exists
       hash: ${{ steps.matrix.outputs.hash }}
       upstream: ${{ steps.matrix.outputs.upstream }}
+      # SHA-256 of [idris2] url + commit from local pack.toml if it exists
       compiler_hash: ${{ steps.matrix.outputs.compiler_hash }}
     steps:
       - name: Install git and TOML parser
@@ -206,6 +211,7 @@ jobs:
 
           pack_states=$(jq -c --arg package "$PACKAGE" --arg suffix "${compiler_hash:+-$compiler_hash}" 'map("pack-state-" + $package + "-" + . + $suffix)' <<< "$collections")
           pack_state=$(jq -r '.[0]' <<< "$pack_states")
+          test_matrix=$(jq -c --argjson pack_states "$pack_states" '[., $pack_states] | transpose | map({collection: .[0], state: .[1]})' <<< "$collections")
           echo "Collections: $collections; custom compiler: $custom_compiler"
           echo "Pack states: $pack_states"
           {
@@ -215,6 +221,7 @@ jobs:
             echo "collections=$collections"
             echo "pack_states=$pack_states"
             echo "pack_state=$pack_state"
+            echo "test_matrix=$test_matrix"
             echo "hash=$HASH"
             echo "upstream=$upstream"
             echo "compiler_hash=$compiler_hash"
@@ -227,7 +234,7 @@ jobs:
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
     outputs: # Pass the upstream values down to the test step
       package: ${{ needs.get-upstream-matrix.outputs.package }}
-      pack_states: ${{ needs.get-upstream-matrix.outputs.pack_states }}
+      test_matrix: ${{ needs.get-upstream-matrix.outputs.test_matrix }}
       project_dir: ${{ needs.get-upstream-matrix.outputs.project_dir }}
     env:
       PROJECT_DIR: ${{ needs.get-upstream-matrix.outputs.project_dir }}
@@ -368,16 +375,16 @@ jobs:
           build_dir: ${{ env.BUILD_DIR }}
 
   test:
-    name: Test ${{ needs.build.outputs.package }} (${{ matrix.state }})
+    name: Test ${{ needs.build.outputs.package }} (${{ matrix.collection }})
     needs: build
-    if: ${{ inputs.run_tests }}
+    if: ${{ !cancelled() && inputs.run_tests }}
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:${{ inputs.container_tag }}
     # jscpd:ignore-start
     strategy:
       fail-fast: false
       matrix:
-        state: ${{ fromJSON(needs.build.outputs.pack_states) }}
+        include: ${{ fromJSON(needs.build.outputs.test_matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -386,9 +393,17 @@ jobs:
       # jscpd:ignore-end
 
       - name: Restore the cached build
+        id: restore
+        continue-on-error: true
         uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
         with:
           state: ${{ matrix.state }}
+
+      - name: Require a pack state from Build
+        if: ${{ steps.restore.outcome != 'success' }}
+        run: |
+          echo "::error::The Build job for this pack state failed, so tests were skipped."
+          exit 1
 
       - name: Run pre-test script
         if: ${{ inputs.pre_test != '' }}
