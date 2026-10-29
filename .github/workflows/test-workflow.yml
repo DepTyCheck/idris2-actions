@@ -77,7 +77,54 @@ jobs:
     with:
       ipkg_path: ${{ matrix.ipkg_path }}
       # These only build & test
-      enable_cache: false
+
+  # Force HEAD Build to fail and assert that latest Test still runs.
+  build-failing-head:
+    uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
+    with:
+      ipkg_path: test_projects/test_failing_head/test_failing_head.ipkg
+      pack_collections: '["latest", "HEAD"]'
+      continue_on_error_collections: '["HEAD"]'
+      pre_build: |
+        if [ "${EFFECTIVE_COLLECTION:-}" = HEAD ]; then
+          echo "error: intentional HEAD build failure"
+          exit 1
+        fi
+
+  check-latest-test-after-head-failure:
+    needs: build-failing-head
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Assert latest pack state exists and HEAD pack state does not
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+          PACKAGE: test_failing_head
+        run: |
+          artifacts=$(gh api --paginate "/repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[].name')
+          printf '%s\n' "$artifacts"
+
+          has_artifact() {
+            printf '%s\n' "$artifacts" | grep -Fxq "$1"
+          }
+
+          latest="pack-state-$PACKAGE-latest"
+          head="pack-state-$PACKAGE-HEAD"
+
+          if ! has_artifact "$latest"; then
+            echo "error: expected artifact '$latest' to exist" >&2
+            exit 1
+          fi
+          if has_artifact "$head"; then
+            echo "error: expected artifact '$head' not to exist" >&2
+            exit 1
+          fi
+          echo "latest pack state present; HEAD pack state absent"
 
   build-custom-compiler-for-cache:
     uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master

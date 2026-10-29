@@ -1,0 +1,10 @@
+[custom.all.test_failing_head]
+type = "local"
+path = "."
+ipkg = "test_failing_head.ipkg"
+test = "test/test.ipkg"
+
+[custom.all.test_failing_head-test]
+type = "local"
+path = "test"
+ipkg = "test.ipkg"

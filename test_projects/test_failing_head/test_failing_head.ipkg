@@ -1,0 +1,6 @@
+package test_failing_head
+version = 0.1.0
+authors = "L3odr0id"
+main = Main
+executable = "test_failing_head"
+sourcedir = "src"
