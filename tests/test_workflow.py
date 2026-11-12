@@ -1,5 +1,6 @@
 """Run the workflow's real shell snippets with isolated files and stub tools."""
 
+import hashlib
 import json
 import os
 import re
@@ -63,8 +64,27 @@ class WorkflowTests(unittest.TestCase):
         self.stub("git", 'echo "222222222abcdef refs/heads/main"')
         self.stub("pack", 'echo "unexpected pack command" >&2; exit 99')
         # macOS lacks sha256sum; the workflow itself runs on Linux.
+        # GNU prefixes '\' when a filename contains a backslash or newline.
         if not shutil.which("sha256sum"):
-            self.stub("sha256sum", 'exec shasum -a 256 "$@"')
+            self.stub(
+                "sha256sum",
+                r"""
+if [ "$#" -eq 0 ]; then
+  exec shasum -a 256
+fi
+escaped=0
+for arg in "$@"; do
+  case "$arg" in
+    *\\*|*$'\n'*) escaped=1 ;;
+  esac
+done
+if [ "$escaped" -eq 1 ]; then
+  shasum -a 256 "$@" | awk '{print "\\" $0}'
+else
+  exec shasum -a 256 "$@"
+fi
+""",
+            )
         if not Path("/etc/os-release").exists():
             self.stub(
                 "cat",
@@ -113,12 +133,16 @@ class WorkflowTests(unittest.TestCase):
             '["idris2"]\nurl="fork" # comment',
         ):
             with self.subTest(config=config):
-                result = self.matrix(config)
+                result = self.name_states(config)
                 self.assertEqual(json.loads(result["collections"]), ["latest"])
-                expected_state = f"pack-state-example-latest-{result['compiler_hash']}"
+                db = Path(self.env["PACK_STATE_DIR"]) / "db"
+                expected_state = self.expected_state("latest", "nightly-260102", db / "nightly-260102.toml")
                 self.assertEqual(json.loads(result["pack_states"]), [expected_state])
                 self.assertEqual(result["pack_state"], expected_state)
-                self.assertEqual(json.loads(result["test_matrix"]), [{"collection": "latest", "state": expected_state}])
+                self.assertEqual(
+                    json.loads(result["build_n_test_matrix"]),
+                    [{"collection": "latest", "state": expected_state, "effective_collection": "nightly-260102"}],
+                )
 
     def test_explicit_custom_collections(self):
         for requested in ('["latest","HEAD","nightly-example"]', '["HEAD"]'):
@@ -133,14 +157,17 @@ class WorkflowTests(unittest.TestCase):
     def test_ordinary_and_nested_config(self):
         (self.root / "pack.toml").write_text(CUSTOM, encoding="utf-8")
         for config in (None, 'collection="nightly-example"', "[idris2]\nextra-args=[]"):
-            result = self.matrix(config)
+            result = self.name_states(config)
             self.assertEqual(json.loads(result["collections"]), ["latest", "HEAD"])
-            self.assertEqual(json.loads(result["pack_states"]), ["pack-state-example-latest", "pack-state-example-HEAD"])
+            db = Path(self.env["PACK_STATE_DIR"]) / "db"
+            latest = self.expected_state("latest", "nightly-260102", db / "nightly-260102.toml")
+            head = self.expected_state("HEAD", "HEAD", db / "HEAD.toml", compiler_version="222222222")
+            self.assertEqual(json.loads(result["pack_states"]), [latest, head])
             self.assertEqual(
-                json.loads(result["test_matrix"]),
+                json.loads(result["build_n_test_matrix"]),
                 [
-                    {"collection": "latest", "state": "pack-state-example-latest"},
-                    {"collection": "HEAD", "state": "pack-state-example-HEAD"},
+                    {"collection": "latest", "state": latest, "effective_collection": "nightly-260102"},
+                    {"collection": "HEAD", "state": head, "effective_collection": "HEAD"},
                 ],
             )
         self.stub("git", 'echo "111111111abcdef refs/heads/main"')
@@ -193,15 +220,14 @@ commit = "unrelated"
 
     def test_collection_names_are_json_escaped(self):
         names = ['nightly-"quoted"', "nightly-\\backslash"]
-        result = self.matrix(CUSTOM, json.dumps(names))
+        result = self.name_states(CUSTOM, json.dumps(names))
         self.assertEqual(json.loads(result["collections"]), names)
+        db = Path(self.env["PACK_STATE_DIR"]) / "db"
+        expected = [self.expected_state(name, name, db / f"{name}.toml") for name in names]
+        self.assertEqual(json.loads(result["pack_states"]), expected)
         self.assertEqual(
-            json.loads(result["pack_states"]),
-            [f"pack-state-example-{c}-{result['compiler_hash']}" for c in names],
-        )
-        self.assertEqual(
-            json.loads(result["test_matrix"]),
-            [{"collection": c, "state": f"pack-state-example-{c}-{result['compiler_hash']}"} for c in names],
+            json.loads(result["build_n_test_matrix"]),
+            [{"collection": name, "state": state, "effective_collection": name} for name, state in zip(names, expected, strict=True)],
         )
 
     def test_invalid_configuration_fails(self):
@@ -295,13 +321,17 @@ commit = "unrelated"
         self.assertGreater(steps.index(step("test", "Test ${{ needs.build.outputs.package }}")), require_index)
 
     def test_restore_uses_emitted_artifact_handles(self):
-        self.assertEqual(step("build", "Upload pack state and build dir")["with"]["label"], "${{ env.COMPILER_HASH }}")
+        upload = step("build", "Upload pack state and build dir")["with"]
+        self.assertEqual(upload["state"], "${{ matrix.state }}")
+        self.assertNotIn("label", upload)
+        self.assertNotIn("package", upload)
+        self.assertNotIn("collection", upload)
         outputs = WORKFLOW["jobs"]["build"]["outputs"]
-        self.assertEqual(outputs["test_matrix"], "${{ needs.get-upstream-matrix.outputs.test_matrix }}")
+        self.assertEqual(outputs["build_n_test_matrix"], "${{ needs.get-upstream-matrix.outputs.build_n_test_matrix }}")
         self.assertNotIn("collections", outputs)
         self.assertNotIn("pack_states", outputs)
         matrix = WORKFLOW["jobs"]["test"]["strategy"]["matrix"]
-        self.assertEqual(matrix["include"], "${{ fromJSON(needs.build.outputs.test_matrix) }}")
+        self.assertEqual(matrix["include"], "${{ fromJSON(needs.build.outputs.build_n_test_matrix) }}")
         self.assertNotIn("collection", matrix)
         self.assertNotIn("state", matrix)
         self.assertEqual(step("test", "Restore the cached build")["with"]["state"], "${{ matrix.state }}")
@@ -327,14 +357,71 @@ commit = "unrelated"
         self.run_script(script)
         self.assertNotEqual(self.values("GITHUB_ENV")["HASH"], original)
 
-    def prepare_cache(self):
-        """Create collection metadata and run cache-key preparation."""
-        self.run_script(step("build", "Resolve pack directories")["run"])
+    def write_os_release(self, version_id="24.04"):
+        """Fixture os-release. The suite runs on machines without /etc/os-release."""
+        path = self.root / "os-release"
+        path.write_text(
+            f'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nVERSION_ID="{version_id}"\nVERSION="24.04.1 LTS (Noble Numbat)"\nID=ubuntu\n',
+            encoding="utf-8",
+        )
+        self.env["OS_RELEASE"] = str(path)
+
+    def seed_pack_db(self, extra_collections=()):
+        """Resolve pack dirs and create the DB files the name step hashes."""
+        self.run_script(step("get-upstream-matrix", "Resolve pack directories")["run"])
         self.env.update(self.values("GITHUB_ENV"))
         db = Path(self.env["PACK_STATE_DIR"]) / "db"
         db.mkdir(parents=True, exist_ok=True)
-        for collection in ("HEAD", "nightly-260101", "nightly-260102"):
-            (db / f"{collection}.toml").write_text('[idris2]\ncommit="database-compiler"\n', encoding="utf-8")
+        for collection in ("HEAD", "nightly-260101", "nightly-260102", *extra_collections):
+            path = db / f"{collection}.toml"
+            if not path.exists():
+                path.write_text('[idris2]\ncommit="database-compiler"\n', encoding="utf-8")
+        return db
+
+    def expected_state(self, collection, effective, pack_db, compiler_version=""):
+        """The shared pack-state-v3 string for one collection."""
+        digest = hashlib.sha256(pack_db.read_bytes()).hexdigest()[:16]
+        suffix = f"-{compiler_version}" if compiler_version else ""
+        if self.env.get("COMPILER_HASH"):
+            suffix += f"-{self.env['COMPILER_HASH']}"
+        return (
+            f"pack-state-v3-{self.env['CONTAINER_TAG']}-ubuntu-{self.env.get('OS_VERSION_ID', '24.04')}-"
+            f"{self.env.get('CHEZ_VERSION', '10.0.0')}-{self.env['HASH']}-"
+            f"{collection}-{effective}-{digest}{suffix}"
+        )
+
+    def name_states(self, config=None, collections="[]", chez="10.0.0", version_id="24.04"):
+        """Run collection selection and the pack-state naming step."""
+        result = self.matrix(config, collections)
+        self.env["COLLECTIONS"] = result["collections"]
+        self.env["COMPILER_HASH"] = result["compiler_hash"]
+        self.env["UPSTREAM"] = result["upstream"]
+        self.env["OS_VERSION_ID"] = version_id
+        self.env["CHEZ_VERSION"] = chez
+        self.write_os_release(version_id)
+        self.stub("chezscheme", f'echo "Chez Scheme Version {chez}" >&2')
+        extras = [name for name in json.loads(result["collections"]) if name != "latest"]
+        self.seed_pack_db(extras)
+        Path(self.env["GITHUB_OUTPUT"]).write_text("", encoding="utf-8")
+        self.run_script(step("get-upstream-matrix", "Name pack states")["run"])
+        result.update(self.values())
+        return result
+
+    def prepare_cache(self):
+        """Create collection metadata and run cache-path preparation."""
+        self.env["COLLECTIONS"] = '["latest"]'
+        self.env["COMPILER_HASH"] = ""
+        self.env["OS_VERSION_ID"] = "24.04"
+        self.env["CHEZ_VERSION"] = "10.0.0"
+        self.write_os_release()
+        self.stub("chezscheme", 'echo "Chez Scheme Version 10.0.0" >&2')
+        self.seed_pack_db()
+        Path(self.env["GITHUB_OUTPUT"]).write_text("", encoding="utf-8")
+        self.run_script(step("get-upstream-matrix", "Name pack states")["run"])
+        row = json.loads(self.values()["build_n_test_matrix"])[0]
+        self.env["EFFECTIVE_COLLECTION"] = row["effective_collection"]
+        self.env["CACHE_KEY"] = row["state"]
+        Path(self.env["GITHUB_OUTPUT"]).write_text("", encoding="utf-8")
         self.run_script(step("build", "Compute cache key with pack state")["run"])
         self.env.update(self.values("GITHUB_ENV"))
         return self.env["CACHE_KEY"]
@@ -382,32 +469,38 @@ commit = "unrelated"
                     expected = self.root / f"explicit-{kind}" if prefix == "PACK" else self.root / f"xdg-{kind}" / "pack"
                     self.assertEqual(self.env[f"PACK_{kind}_DIR"], str(expected))
 
+    def rerun_names(self):
+        """Re-run pack-state naming after an input change."""
+        Path(self.env["GITHUB_OUTPUT"]).write_text("", encoding="utf-8")
+        self.run_script(step("get-upstream-matrix", "Name pack states")["run"])
+        return self.values()["pack_state"]
+
     def test_cache_key_separates_inputs_and_database(self):
-        original = self.prepare_cache()
-        self.assertTrue(original.startswith("build-state-v2-"))
+        original = self.name_states()["pack_state"]
+        self.assertTrue(original.startswith("pack-state-v3-"))
         for key in ("HASH", "CONTAINER_TAG", "COMPILER_HASH"):
             old = self.env[key]
             self.env[key] = "different"
-            self.run_script(step("build", "Compute cache key with pack state")["run"])
-            self.assertNotEqual(self.values("GITHUB_ENV")["CACHE_KEY"], original, key)
+            self.assertNotEqual(self.rerun_names(), original, key)
             self.env[key] = old
         db = Path(self.env["PACK_STATE_DIR"]) / "db"
         (db / "nightly-260102.toml").write_text("changed database", encoding="utf-8")
-        self.run_script(step("build", "Compute cache key with pack state")["run"])
-        self.assertNotEqual(self.values("GITHUB_ENV")["CACHE_KEY"], original)
-        self.env["COLLECTION"] = "HEAD"
-        self.run_script(step("build", "Compute cache key with pack state")["run"])
-        head_key = self.values("GITHUB_ENV")["CACHE_KEY"]
+        self.assertNotEqual(self.rerun_names(), original)
+        self.env["COLLECTIONS"] = '["HEAD"]'
+        head_key = self.rerun_names()
         self.assertNotEqual(head_key, original)
         self.env["UPSTREAM"] = "333333333"
-        self.run_script(step("build", "Compute cache key with pack state")["run"])
-        self.assertNotEqual(self.values("GITHUB_ENV")["CACHE_KEY"], head_key)
+        self.assertNotEqual(self.rerun_names(), head_key)
         self.env["UPSTREAM"] = ""
-        self.run_script(step("build", "Compute cache key with pack state")["run"])
-        self.assertEqual(self.values("GITHUB_ENV")["CACHE_KEY"], head_key)
+        self.assertEqual(self.rerun_names(), head_key)
 
     def test_restore_precedes_compiler_setup_and_reselects_collection(self):
         self.prepare_cache()
+        switch = step("build", "Switch collection")
+        self.assertEqual(switch["env"]["EFFECTIVE_COLLECTION"], "${{ matrix.effective_collection }}")
+        cache_step = step("build", "Compute cache key with pack state")
+        self.assertNotIn("env", cache_step)
+        self.assertNotIn("EFFECTIVE_COLLECTION", cache_step["run"])
         self.assertEqual(self.env["EFFECTIVE_COLLECTION"], "nightly-260102")
         steps = WORKFLOW["jobs"]["build"]["steps"]
         restore_index = steps.index(step("build", "Restore build cache"))
@@ -480,12 +573,11 @@ printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
                 build = self.project / "build"
                 build.mkdir(exist_ok=True)
                 (build / "Main.ttc").write_text("compiled", encoding="utf-8")
-                result = self.matrix(CUSTOM)
-                self.env.update(STATE=result["pack_state"], LABEL=result["compiler_hash"])
-                describe = upload["runs"]["steps"][0]["run"]
-                self.run_script(describe)
-                self.assertEqual(self.values()["state"], self.env["STATE"])
-                self.run_script(upload["runs"]["steps"][1]["run"])
+                result = self.name_states(CUSTOM)
+                self.assertEqual(set(upload["inputs"]), {"state", "project_dir", "build_dir"})
+                self.assertTrue(upload["inputs"]["state"]["required"])
+                self.env["STATE"] = result["pack_state"]
+                self.run_script(upload["runs"]["steps"][0]["run"])
                 archive = self.root / f"{self.env['STATE']}.tar"
                 with tarfile.open(archive) as packed:
                     members = {m.name for m in packed.getmembers()}
@@ -506,6 +598,50 @@ printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
                 self.assertEqual((build / "Main.ttc").read_text(encoding="utf-8"), "compiled")
                 for kind, directory in directories.items():
                     self.assertEqual((directory / "marker").read_text(encoding="utf-8"), kind)
+
+    def test_build_uses_published_state(self):
+        matrix = WORKFLOW["jobs"]["build"]["strategy"]["matrix"]
+        self.assertEqual(matrix["include"], "${{ fromJSON(needs.get-upstream-matrix.outputs.build_n_test_matrix) }}")
+        self.assertNotIn("collection", matrix)
+        restore = step("build", "Restore build cache")
+        save = step("build", "Save build cache")
+        self.assertEqual(restore["with"]["key"], "${{ matrix.state }}")
+        self.assertEqual(save["with"]["key"], "${{ matrix.state }}")
+        script = step("build", "Compute cache key with pack state")["run"]
+        self.assertNotIn("build-state-v2", script)
+        self.assertNotIn("pack-state-v3", script)
+        self.assertNotIn("build-state-v2", (ROOT / ".github/workflows/build-and-test.yml").read_text(encoding="utf-8"))
+
+    def test_readme_documents_shared_cache_key(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        formula = "pack-state-v3-$CONTAINER_TAG-$OS-$CHEZ-$HASH-$COLLECTION-$effective_collection-$pack_hash[-$compiler_version][-$COMPILER_HASH]"
+        self.assertIn(formula, readme)
+        self.assertNotIn("build-state-v2", readme)
+        self.assertIn("ubuntu-24.04", readme)
+        self.assertIn("10.0.0", readme)
+        self.assertIn("same string", readme)
+
+    def test_pack_state_name_includes_os_and_chez(self):
+        result = self.name_states()
+        db = Path(self.env["PACK_STATE_DIR"]) / "db"
+        latest = self.expected_state("latest", "nightly-260102", db / "nightly-260102.toml")
+        head = self.expected_state("HEAD", "HEAD", db / "HEAD.toml", compiler_version="222222222")
+        self.assertNotIn("24.04.1", latest)
+        self.assertEqual(json.loads(result["pack_states"]), [latest, head])
+        self.assertEqual(result["pack_state"], latest)
+        self.assertEqual(
+            json.loads(result["build_n_test_matrix"]),
+            [
+                {"collection": "latest", "state": latest, "effective_collection": "nightly-260102"},
+                {"collection": "HEAD", "state": head, "effective_collection": "HEAD"},
+            ],
+        )
+        script = step("get-upstream-matrix", "Name pack states")["run"]
+        self.assertIn('OS="${ID}-${VERSION_ID}"', script)
+        self.assertIn("chezscheme --version 2>&1", script)
+        bumped = self.name_states(chez="9.5.8", version_id="22.04")
+        self.assertNotEqual(bumped["pack_state"], latest)
+        self.assertIn("ubuntu-22.04-9.5.8-", bumped["pack_state"])
 
 
 if __name__ == "__main__":

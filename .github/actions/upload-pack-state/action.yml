@@ -5,16 +5,9 @@ description: >-
   Call this after your own pack setup/build to publish the state downstream.
 
 inputs:
-  package:
-    description: The package name; used for the artifact name and exposed as an output for restore-pack-state.
+  state:
+    description: Artifact name and the restore handle passed to restore-pack-state.
     required: true
-  collection:
-    description: Pack collection disambiguating the artifact (e.g. latest or HEAD).
-    required: true
-  label:
-    description: Optional extra label appended to the artifact name.
-    required: false
-    default: ""
   project_dir:
     description: Directory holding the .ipkg and pack.toml.
     required: false
@@ -27,36 +20,21 @@ inputs:
 outputs:
   state:
     description: Restore handle to pass to restore-pack-state.
-    value: ${{ steps.describe.outputs.state }}
+    value: ${{ inputs.state }}
 
 runs:
   using: composite
   steps:
-    - name: Describe the uploaded pack state
-      id: describe
-      shell: bash
-      env:
-        PACKAGE: ${{ inputs.package }}
-        COLLECTION: ${{ inputs.collection }}
-        LABEL: ${{ inputs.label }}
-      run: |
-        state="pack-state-$PACKAGE-$COLLECTION"
-        if [ -n "$LABEL" ]; then
-          state="$state-$LABEL"
-        fi
-
-        echo "state=$state" >> "$GITHUB_OUTPUT"
-
     - name: Tar the pack state and build dir
       shell: bash
       working-directory: ${{ inputs.project_dir }}
       env:
         BUILD_DIR: ${{ inputs.build_dir }}
-        STATE: ${{ steps.describe.outputs.state }}
+        STATE: ${{ inputs.state }}
       run: |
         # Copied from https://github.com/buzden/deptycheck/blob/a1a6b5777f52d8ece7e004708b2db53fd737af2e/.github/tar-pack
         # A single archive holds the pack folders plus the project's build dir and pack.toml, all with absolute paths.
-        # Named per package, collection and label, so several artifacts can be uploaded in one workflow.
+        # The archive is named with the state input, so several artifacts can be uploaded in one workflow.
         #
         # GNU tar exit 1 means some files changed while being archived, ignore it. Exit 2+ is fatal.
         TAR="$(which tar)"
@@ -84,5 +62,5 @@ runs:
     - name: Upload pack state and build dir
       uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.describe.outputs.state }}
-        path: ${{ steps.describe.outputs.state }}.tar
+        name: ${{ inputs.state }}
+        path: ${{ inputs.state }}.tar

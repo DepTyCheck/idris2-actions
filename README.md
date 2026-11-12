@@ -6,6 +6,39 @@ A reusable GitHub Actions workflow that builds and tests any
 It runs `pack build` and `pack test` against both the `latest` and `HEAD` pack collections
 (the `HEAD` run is skipped automatically when it matches the compiler version from the `latest` collection).
 
+## Real examples
+
+- Trivial usage: [buzden/idris2-summary-stat](https://github.com/buzden/idris2-summary-stat)
+- Advanced usage:
+  - [buzden/deptycheck](https://github.com/buzden/deptycheck) — custom test runs and installation of extra libs into the pack environment
+  - [DepTyCheck/verilog-model](https://github.com/DepTyCheck/verilog-model) — advanced usage of the results of `pack run`
+
+## Cache key
+
+The build job uses the GitHub Actions cache to reuse a successful build across later workflow runs.
+A matching key restores the project build directory and pack state; a miss builds from scratch and saves a new entry.
+
+The Actions cache key and the uploaded artifact name are the same string:
+
+```text
+pack-state-v3-$CONTAINER_TAG-$OS-$CHEZ-$HASH-$COLLECTION-$effective_collection-$pack_hash[-$compiler_version][-$COMPILER_HASH]
+```
+
+`pack_state` and `pack_states` are that string, one per collection.
+
+| Segment              | Example                        | Meaning                                                                                                       |
+| -------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| prefix               | `pack-state-v3`                | Cache namespace so older entries cannot match                                                                 |
+| container tag        | `latest`                       | `container_tag` input (default `latest`), the `ghcr.io/stefan-hoeck/idris2-pack` image tag                    |
+| OS                   | `ubuntu-24.04`                 | `ID-VERSION_ID` from the image's `/etc/os-release`                                                            |
+| Chez                 | `10.0.0`                       | Version number from `chezscheme --version` in that image                                                      |
+| source hash          | `6434353b1c9684f0`             | First 16 hex chars of a hash of the `.ipkg`, `src/`, and `pack.toml`                                          |
+| requested collection | `latest`                       | The matrix collection (`COLLECTION`)                                                                          |
+| effective collection | `nightly-261111`               | The pack DB file that will actually be used                                                                   |
+| pack DB hash         | `9aa50ce230b3a755`             | First 16 hex chars of the SHA-256 of `$PACK_STATE_DIR/db/$effective_collection.toml`                          |
+| compiler revision    | `c24d53e41`                    | First 9 chars of Idris2 `main`, appended only when the requested collection is `HEAD`                         |
+| compiler hash        | appended for a custom compiler | First 16 hex chars of the SHA-256 of `["<url>", "<commit>"]` from `pack.toml`. Omitted for the stock compiler |
+
 ## Custom compiler
 
 The workflow reads `pack.toml` beside the selected `.ipkg`.
@@ -20,8 +53,8 @@ commit = "..."
 A local `idris2.url` or `idris2.commit` override selects only `latest` by default.
 Explicit `pack_collections` are used as supplied, but including `HEAD` together with a custom compiler is an error.
 
-Custom compiler artifacts are named `pack-state-<package>-<collection>-<compiler-hash>`.
-Use the `pack_state` or `pack_states` outputs to restore them by their full names.
+A custom compiler appends `-$COMPILER_HASH` on that same string.
+`upload-pack-state` uses the `state` you pass as the artifact name.
 
 ## Usage
 
@@ -197,8 +230,7 @@ jobs:
         id: upload-pack-state
         uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@v1
         with:
-          package: my-package
-          collection: latest
+          state: pack-state-my-package-latest
 
   use-pack-state:
     # 3. Declare build job as dependency
@@ -230,10 +262,3 @@ python3 -m venv .venv
 ```
 
 Linter configs live in `.github/linters`.
-
-## Real examples
-
-- Trivial usage: [buzden/idris2-summary-stat](https://github.com/buzden/idris2-summary-stat)
-- Advanced usage:
-  - [buzden/deptycheck](https://github.com/buzden/deptycheck) — custom test runs and installation of extra libs into the pack environment
-  - [DepTyCheck/verilog-model](https://github.com/DepTyCheck/verilog-model) — advanced usage of the results of `pack run`
