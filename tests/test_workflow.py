@@ -141,7 +141,13 @@ fi
                 self.assertEqual(result["pack_state"], expected_state)
                 self.assertEqual(
                     json.loads(result["build_n_test_matrix"]),
-                    [{"collection": "latest", "state": expected_state, "effective_collection": "nightly-260102"}],
+                    [
+                        {
+                            "collection": "latest",
+                            "state": expected_state,
+                            "effective_collection": "nightly-260102",
+                        }
+                    ],
                 )
 
     def test_explicit_custom_collections(self):
@@ -166,8 +172,16 @@ fi
             self.assertEqual(
                 json.loads(result["build_n_test_matrix"]),
                 [
-                    {"collection": "latest", "state": latest, "effective_collection": "nightly-260102"},
-                    {"collection": "HEAD", "state": head, "effective_collection": "HEAD"},
+                    {
+                        "collection": "latest",
+                        "state": latest,
+                        "effective_collection": "nightly-260102",
+                    },
+                    {
+                        "collection": "HEAD",
+                        "state": head,
+                        "effective_collection": "HEAD",
+                    },
                 ],
             )
         self.stub("git", 'echo "111111111abcdef refs/heads/main"')
@@ -313,12 +327,18 @@ commit = "unrelated"
         self.assertEqual(require["if"], "${{ steps.restore.outcome != 'success' }}")
         result = self.run_script(require["run"], False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("The Build job for this pack state failed, so tests were skipped.", result.stdout + result.stderr)
+        self.assertIn(
+            "The Build job for this pack state failed, so tests were skipped.",
+            result.stdout + result.stderr,
+        )
         steps = WORKFLOW["jobs"]["test"]["steps"]
         require_index = steps.index(require)
         self.assertGreater(require_index, steps.index(restore))
         self.assertGreater(steps.index(step("test", "Run pre-test script")), require_index)
-        self.assertGreater(steps.index(step("test", "Test ${{ needs.build.outputs.package }}")), require_index)
+        self.assertGreater(
+            steps.index(step("test", "Test ${{ needs.build.outputs.package }}")),
+            require_index,
+        )
 
     def test_restore_uses_emitted_artifact_handles(self):
         upload = step("build", "Upload pack state and build dir")["with"]
@@ -327,14 +347,23 @@ commit = "unrelated"
         self.assertNotIn("package", upload)
         self.assertNotIn("collection", upload)
         outputs = WORKFLOW["jobs"]["build"]["outputs"]
-        self.assertEqual(outputs["build_n_test_matrix"], "${{ needs.get-upstream-matrix.outputs.build_n_test_matrix }}")
+        self.assertEqual(
+            outputs["build_n_test_matrix"],
+            "${{ needs.get-upstream-matrix.outputs.build_n_test_matrix }}",
+        )
         self.assertNotIn("collections", outputs)
         self.assertNotIn("pack_states", outputs)
         matrix = WORKFLOW["jobs"]["test"]["strategy"]["matrix"]
-        self.assertEqual(matrix["include"], "${{ fromJSON(needs.build.outputs.build_n_test_matrix) }}")
+        self.assertEqual(
+            matrix["include"],
+            "${{ fromJSON(needs.build.outputs.build_n_test_matrix) }}",
+        )
         self.assertNotIn("collection", matrix)
         self.assertNotIn("state", matrix)
-        self.assertEqual(step("test", "Restore the cached build")["with"]["state"], "${{ matrix.state }}")
+        self.assertEqual(
+            step("test", "Restore the cached build")["with"]["state"],
+            "${{ matrix.state }}",
+        )
 
     def test_compiler_hash_uses_only_url_and_commit(self):
         original = self.matrix(CUSTOM)["compiler_hash"]
@@ -372,7 +401,12 @@ commit = "unrelated"
         self.env.update(self.values("GITHUB_ENV"))
         db = Path(self.env["PACK_STATE_DIR"]) / "db"
         db.mkdir(parents=True, exist_ok=True)
-        for collection in ("HEAD", "nightly-260101", "nightly-260102", *extra_collections):
+        for collection in (
+            "HEAD",
+            "nightly-260101",
+            "nightly-260102",
+            *extra_collections,
+        ):
             path = db / f"{collection}.toml"
             if not path.exists():
                 path.write_text('[idris2]\ncommit="database-compiler"\n', encoding="utf-8")
@@ -497,7 +531,16 @@ commit = "unrelated"
     def test_restore_precedes_compiler_setup_and_reselects_collection(self):
         self.prepare_cache()
         switch = step("build", "Switch collection")
-        self.assertEqual(switch["env"]["EFFECTIVE_COLLECTION"], "${{ matrix.effective_collection }}")
+        self.assertEqual(
+            switch["uses"],
+            "DepTyCheck/idris2-actions/.github/actions/retry-pack-command@v1",
+        )
+        self.assertEqual(
+            switch["with"]["command"],
+            'pack switch "${{ matrix.effective_collection }}"',
+        )
+        self.assertEqual(switch["with"]["working-directory"], "${{ env.PROJECT_DIR }}")
+        self.assertNotIn("run", switch)
         cache_step = step("build", "Compute cache key with pack state")
         self.assertNotIn("env", cache_step)
         self.assertNotIn("EFFECTIVE_COLLECTION", cache_step["run"])
@@ -529,10 +572,35 @@ grep -q database-compiler "$PACK_STATE_DIR/db/$2.toml"
 printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
 """,
         )
-        self.run_script(step("build", "Switch collection")["run"])
+        self.env["COMMAND"] = 'pack switch "nightly-260102"'
+        self.env["WORKING_DIRECTORY"] = str(self.project)
+        self.run_script(self.retry_script())
         self.assertIn("database-compiler", database.read_text(encoding="utf-8"))
         self.assertIn("nightly-260102", (state / "pack.toml").read_text(encoding="utf-8"))
         self.assertEqual((self.project / "pack.toml").read_text(encoding="utf-8"), CUSTOM)
+
+    def test_bleeding_edge_pin_is_not_retried(self):
+        action = "DepTyCheck/idris2-actions/.github/actions/retry-pack-command@v1"
+        steps = WORKFLOW["jobs"]["build"]["steps"]
+        restore_index = steps.index(step("build", "Restore build cache"))
+        pin = step("build", "Pin bleeding-edge Idris2 commit")
+        fetch = step("build", "Switch to the bleeding edge compiler")
+        pin_index = steps.index(pin)
+        self.assertEqual(pin["if"], "matrix.collection == 'HEAD'")
+        self.assertEqual(fetch["if"], "matrix.collection == 'HEAD'")
+        self.assertGreater(pin_index, restore_index)
+        self.assertLess(pin_index, steps.index(fetch))
+        self.assertEqual(fetch["uses"], action)
+        self.assertEqual(fetch["with"]["command"], "pack fetch")
+        self.assertEqual(fetch["with"]["working-directory"], "${{ env.PROJECT_DIR }}")
+        self.assertNotIn("pack ", pin["run"])
+        self.assertIn('commit = "latest:main"', pin["run"])
+        self.assertIn("[idris2]", pin["run"])
+        (self.project / "pack.toml").write_text(CUSTOM, encoding="utf-8")
+        self.run_script(pin["run"])
+        pinned = (self.project / "pack.toml").read_text(encoding="utf-8")
+        self.assertEqual(pinned.count('commit = "latest:main"'), 1)
+        self.assertNotIn("pack.toml", self.retry_script())
 
     # pylint: disable-next=too-many-locals,too-many-statements
     def test_artifact_round_trip(self):
@@ -601,7 +669,10 @@ printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
 
     def test_build_uses_published_state(self):
         matrix = WORKFLOW["jobs"]["build"]["strategy"]["matrix"]
-        self.assertEqual(matrix["include"], "${{ fromJSON(needs.get-upstream-matrix.outputs.build_n_test_matrix) }}")
+        self.assertEqual(
+            matrix["include"],
+            "${{ fromJSON(needs.get-upstream-matrix.outputs.build_n_test_matrix) }}",
+        )
         self.assertNotIn("collection", matrix)
         restore = step("build", "Restore build cache")
         save = step("build", "Save build cache")
@@ -610,7 +681,10 @@ printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
         script = step("build", "Compute cache key with pack state")["run"]
         self.assertNotIn("build-state-v2", script)
         self.assertNotIn("pack-state-v3", script)
-        self.assertNotIn("build-state-v2", (ROOT / ".github/workflows/build-and-test.yml").read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "build-state-v2",
+            (ROOT / ".github/workflows/build-and-test.yml").read_text(encoding="utf-8"),
+        )
 
     def test_readme_documents_shared_cache_key(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -632,7 +706,11 @@ printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
         self.assertEqual(
             json.loads(result["build_n_test_matrix"]),
             [
-                {"collection": "latest", "state": latest, "effective_collection": "nightly-260102"},
+                {
+                    "collection": "latest",
+                    "state": latest,
+                    "effective_collection": "nightly-260102",
+                },
                 {"collection": "HEAD", "state": head, "effective_collection": "HEAD"},
             ],
         )
@@ -642,6 +720,104 @@ printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
         bumped = self.name_states(chez="9.5.8", version_id="22.04")
         self.assertNotEqual(bumped["pack_state"], latest)
         self.assertIn("ubuntu-22.04-9.5.8-", bumped["pack_state"])
+
+    def retry_script(self):
+        """Load the retry action's shell."""
+        action = yaml.safe_load((ROOT / ".github/actions/retry-pack-command/action.yml").read_text(encoding="utf-8"))
+        return action["runs"]["steps"][0]["run"]
+
+    def pack_attempts(self, body):
+        """Stub pack and sleep, recording invocations and sleep arguments."""
+        log = self.root / "pack-invocations"
+        sleeps = self.root / "sleeps"
+        log.unlink(missing_ok=True)
+        sleeps.unlink(missing_ok=True)
+        self.env["PACK_LOG"] = str(log)
+        self.env["SLEEP_LOG"] = str(sleeps)
+        self.stub("sleep", 'echo "$1" >> "$SLEEP_LOG"')
+        self.stub("pack", body)
+        return log, sleeps
+
+    def warnings_of(self, result):
+        """Return GitHub warning lines from a script run."""
+        return [line for line in result.stdout.splitlines() if line.startswith("::warning::")]
+
+    # pylint: disable-next=too-many-statements
+    def test_retry_pack_command_on_ls_remote(self):
+        script = self.retry_script()
+        self.env["COMMAND"] = "pack fetch"
+        self.env["WORKING_DIRECTORY"] = str(self.project)
+        self.env["RETRY_PAUSE_SECONDS"] = "0"
+        real_error = """echo 'Command: "git" "ls-remote" "https://git.sr.ht/~janus/utf8" "master"' >&2; exit 1"""
+
+        log, _sleeps = self.pack_attempts(f"""
+echo "$*" >> "$PACK_LOG"
+if [ "$(grep -c . "$PACK_LOG")" -eq 1 ]; then
+  {real_error}
+fi
+""")
+        result = self.run_script(script)
+        warnings = self.warnings_of(result)
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["fetch", "fetch"])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("retry 1 of 3", warnings[0])
+        self.assertNotIn("git.sr.ht", warnings[0])
+
+        log, sleeps = self.pack_attempts(f"""
+echo "$*" >> "$PACK_LOG"
+{real_error}
+""")
+        result = self.run_script(script, check=False)
+        warnings = self.warnings_of(result)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 4)
+        self.assertEqual(len(warnings), 3)
+        for number, warning in enumerate(warnings, start=1):
+            self.assertIn(f"retry {number} of 3", warning)
+        self.assertEqual(sleeps.read_text(encoding="utf-8").splitlines(), ["0", "0", "0"])
+
+        log, sleeps = self.pack_attempts("""
+echo "$*" >> "$PACK_LOG"
+echo "[ fatal ] other" >&2
+exit 7
+""")
+        result = self.run_script(script, check=False)
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["fetch"])
+        self.assertNotIn("::warning::", result.stdout)
+        self.assertFalse(sleeps.exists())
+
+        log, sleeps = self.pack_attempts("""
+echo "$*" >> "$PACK_LOG"
+echo 'Command: "git" "ls-remote"'
+exit 0
+""")
+        result = self.run_script(script)
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["fetch"])
+        self.assertEqual(self.warnings_of(result), [])
+        self.assertFalse(sleeps.exists())
+
+        self.env.pop("RETRY_PAUSE_SECONDS")
+        _log, sleeps = self.pack_attempts(f"""
+echo "$*" >> "$PACK_LOG"
+if [ "$(grep -c . "$PACK_LOG")" -eq 1 ]; then
+  {real_error}
+fi
+""")
+        self.run_script(script)
+        self.assertEqual(sleeps.read_text(encoding="utf-8").strip(), "30")
+
+    def test_relative_project_dir_is_applied_once(self):
+        action = yaml.safe_load((ROOT / ".github/actions/retry-pack-command/action.yml").read_text(encoding="utf-8"))
+        step_def = action["runs"]["steps"][0]
+        self.assertNotIn("working-directory", step_def)
+        nested = self.project / "lib"
+        nested.mkdir()
+        self.env["WORKING_DIRECTORY"] = "lib"
+        self.env["COMMAND"] = "pwd -P"
+        self.env["RETRY_PAUSE_SECONDS"] = "0"
+        result = self.run_script(step_def["run"])
+        self.assertIn(str(nested), result.stdout)
 
 
 if __name__ == "__main__":

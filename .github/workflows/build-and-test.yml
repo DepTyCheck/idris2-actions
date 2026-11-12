@@ -336,18 +336,24 @@ jobs:
           path: ${{ steps.cache-key.outputs.cache_paths }}
           key: ${{ matrix.state }}
 
-      - name: Switch to the bleeding edge compiler
+      - name: Pin bleeding-edge Idris2 commit
         if: matrix.collection == 'HEAD'
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           { echo; echo "[idris2]"; echo 'commit = "latest:main"'; } >> pack.toml
-          pack fetch
+
+      - name: Switch to the bleeding edge compiler
+        if: matrix.collection == 'HEAD'
+        uses: DepTyCheck/idris2-actions/.github/actions/retry-pack-command@v1
+        with:
+          command: pack fetch
+          working-directory: ${{ env.PROJECT_DIR }}
 
       - name: Switch collection
-        working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          EFFECTIVE_COLLECTION: ${{ matrix.effective_collection }}
-        run: pack switch "$EFFECTIVE_COLLECTION"
+        uses: DepTyCheck/idris2-actions/.github/actions/retry-pack-command@v1
+        with:
+          command: pack switch "${{ matrix.effective_collection }}"
+          working-directory: ${{ env.PROJECT_DIR }}
 
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}

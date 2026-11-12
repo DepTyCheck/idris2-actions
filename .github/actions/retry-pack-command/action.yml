@@ -1,0 +1,55 @@
+name: Retry a pack command
+description: >-
+  Run a pack command and, when it fails with a listed git access error,
+  warn and retry. Other failures are returned immediately.
+
+inputs:
+  command:
+    description: Shell command to run, for example pack fetch.
+    required: true
+  working-directory:
+    description: Directory the command runs in.
+    required: false
+    default: .
+
+runs:
+  using: composite
+  steps:
+    - name: Run with retries
+      shell: bash
+      env:
+        COMMAND: ${{ inputs.command }}
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        cd "$WORKING_DIRECTORY"
+        log=$(mktemp)
+        trap 'rm -f "$log"' EXIT
+        pause="${RETRY_PAUSE_SECONDS:-30}"
+        # Add another quoted substring here to retry a similar access failure with the same pause and cap.
+        signatures=(
+          'Command: "git" "ls-remote"'
+        )
+        attempt=0
+        while true; do
+          set +e
+          bash -c "$COMMAND" 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$status" -eq 0 ]]; then
+            exit 0
+          fi
+          matched=0
+          for signature in "${signatures[@]}"; do
+            if grep -F -q -- "$signature" "$log"; then
+              matched=1
+              break
+            fi
+          done
+          if [[ "$matched" -eq 0 || "$attempt" -ge 3 ]]; then
+            exit "$status"
+          fi
+          attempt=$((attempt + 1))
+          echo "::warning::${COMMAND} failed with git ls-remote (retry ${attempt} of 3); waiting ${pause}s"
+          sleep "$pause"
+        done
