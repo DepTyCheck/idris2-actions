@@ -180,17 +180,37 @@ jobs:
             exit 1
           fi
 
-  # Build root project, restore it and run
+  # The command fails once with pack's git ls-remote error and succeeds on the retry.
+  # RETRY_PAUSE_SECONDS=0 keeps the pause from adding 30s. The script rejects a third run.
+  retry-pack-on-ls-remote:
+    runs-on: ubuntu-latest
+    env:
+      RETRY_PAUSE_SECONDS: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Retry when git ls-remote fails
+        uses: DepTyCheck/idris2-actions/.github/actions/retry-pack-command@master
+        with:
+          command: bash scripts/ci/fail-once-on-ls-remote.sh
+          working-directory: ${{ github.workspace }}
+
+      - name: Assert the command was retried once
+        run: test "$(cat "$RUNNER_TEMP/ls-remote-attempts")" = 2
+
+  # Build root project, restore it and run.
+  # Own ipkg so this does not share the empty ipkg_path concurrency group.
   build-root-for-cache:
     uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
+    with:
+      ipkg_path: test_projects/test_root_cache/test_root_cache.ipkg
 
-  # Build root project with a hardcoded pack collection.
-  # Same default ipkg as the other root calls, so this must not overlap them:
-  # build-and-test cancels an in-progress run in group workflow-ref-ipkg_path.
+  # Build with a hardcoded pack collection.
+  # Different ipkg_path from the cache jobs, so it can run beside them.
   build-root-nightly-260407:
-    needs:
-      - build-root-for-cache
-      - build-root-from-github-cache
     uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
     with:
       pack_collections: '["nightly-260407"]'
@@ -228,8 +248,9 @@ jobs:
     needs: build-root-for-cache
     uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
     with:
+      ipkg_path: test_projects/test_root_cache/test_root_cache.ipkg
       run_tests: false
-      pre_build: bash "$GITHUB_WORKSPACE/scripts/ci/guard-cached-pack-build.sh" test_bin
+      pre_build: bash "$GITHUB_WORKSPACE/scripts/ci/guard-cached-pack-build.sh" test_root_cache
 
   # pack_state must equal pack_states[0]
   check-pack-state-output:

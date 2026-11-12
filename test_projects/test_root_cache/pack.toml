@@ -1,0 +1,10 @@
+[custom.all.test_root_cache]
+type = "local"
+path = "."
+ipkg = "test_root_cache.ipkg"
+test = "test/test.ipkg"
+
+[custom.all.test_root_cache-test]
+type = "local"
+path = "test"
+ipkg = "test.ipkg"

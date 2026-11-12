@@ -1,0 +1,6 @@
+package test_root_cache
+version = 0.1.0
+authors = "L3odr0id"
+main = Main
+executable = "test_root_cache"
+sourcedir = "src"
