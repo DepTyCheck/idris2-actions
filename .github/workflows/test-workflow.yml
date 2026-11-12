@@ -85,8 +85,12 @@ jobs:
       ipkg_path: test_projects/test_failing_head/test_failing_head.ipkg
       pack_collections: '["latest", "HEAD"]'
       continue_on_error_collections: '["HEAD"]'
+      # EFFECTIVE_COLLECTION is only on the switch step. pack switch has
+      # already written the resolved collection into the pack state.
       pre_build: |
-        if [ "${EFFECTIVE_COLLECTION:-}" = HEAD ]; then
+        state_dir="${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}"
+        collection=$(sed -n 's/^[[:space:]]*collection[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$state_dir/pack.toml" | tail -n 1)
+        if [ "$collection" = HEAD ]; then
           echo "error: intentional HEAD build failure"
           exit 1
         fi
@@ -104,7 +108,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.run_id }}
           REPO: ${{ github.repository }}
-          PACKAGE: test_failing_head
+          LATEST: ${{ fromJSON(needs.build-failing-head.outputs.pack_states)[0] }}
+          HEAD_STATE: ${{ fromJSON(needs.build-failing-head.outputs.pack_states)[1] }}
         run: |
           artifacts=$(gh api --paginate "/repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[].name')
           printf '%s\n' "$artifacts"
@@ -113,15 +118,12 @@ jobs:
             printf '%s\n' "$artifacts" | grep -Fxq "$1"
           }
 
-          latest="pack-state-$PACKAGE-latest"
-          head="pack-state-$PACKAGE-HEAD"
-
-          if ! has_artifact "$latest"; then
-            echo "error: expected artifact '$latest' to exist" >&2
+          if ! has_artifact "$LATEST"; then
+            echo "error: expected artifact '$LATEST' to exist" >&2
             exit 1
           fi
-          if has_artifact "$head"; then
-            echo "error: expected artifact '$head' not to exist" >&2
+          if has_artifact "$HEAD_STATE"; then
+            echo "error: expected artifact '$HEAD_STATE' not to exist" >&2
             exit 1
           fi
           echo "latest pack state present; HEAD pack state absent"
@@ -152,8 +154,16 @@ jobs:
         working-directory: ${{ needs.build-custom-compiler-for-cache.outputs.project_dir }}
         env:
           PACKAGE: ${{ needs.build-custom-compiler-for-cache.outputs.package }}
+          BUILD_DIR: ${{ needs.build-custom-compiler-for-cache.outputs.build_dir }}
           COMPILER_COMMIT: 41b6b8904e6bc04e8103be424add995b7ae44143
         run: |
+          if ! find "$BUILD_DIR" -name '*.ttc' -print -quit | grep -q .; then
+            echo "error: restored artifact has no compiled modules in $BUILD_DIR" >&2
+            find "$BUILD_DIR" -type f >&2 || true
+            exit 1
+          fi
+          before=$(find "$BUILD_DIR" -name '*.ttc' -type f -print0 | sort -z | xargs -0 sha256sum)
+
           mkdir -p "$RUNNER_TEMP/no-compiler-rebuild"
           printf '#!/bin/sh\necho "error: cache restore attempted a compiler rebuild (make)" >&2\nexit 1\n' > "$RUNNER_TEMP/no-compiler-rebuild/make"
           chmod +x "$RUNNER_TEMP/no-compiler-rebuild/make"
@@ -164,13 +174,23 @@ jobs:
           "$compiler" --version | grep -F "${COMPILER_COMMIT:0:9}"
           pack test "$PACKAGE"
 
+          after=$(find "$BUILD_DIR" -name '*.ttc' -type f -print0 | sort -z | xargs -0 sha256sum)
+          if [ "$before" != "$after" ]; then
+            echo "error: pack test rebuilt modules restored from the artifact" >&2
+            exit 1
+          fi
+
   # Build root project, restore it and run
   build-root-for-cache:
     uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
 
   # Build root project with a hardcoded pack collection.
+  # Same default ipkg as the other root calls, so this must not overlap them:
+  # build-and-test cancels an in-progress run in group workflow-ref-ipkg_path.
   build-root-nightly-260407:
-    needs: build-root-for-cache # Avoid skipping due to concurrency settings
+    needs:
+      - build-root-for-cache
+      - build-root-from-github-cache
     uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
     with:
       pack_collections: '["nightly-260407"]'
@@ -194,11 +214,22 @@ jobs:
         with:
           state: ${{ matrix.state }}
 
-      - name: Run the package
+      - name: Run the package from the restored build
         working-directory: ${{ needs.build-root-for-cache.outputs.project_dir }}
         env:
           PACKAGE: ${{ needs.build-root-for-cache.outputs.package }}
-        run: pack run "$PACKAGE"
+          BUILD_DIR: ${{ needs.build-root-for-cache.outputs.build_dir }}
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/run-restored-executable.sh"
+
+  # The first root build saved the GitHub Actions cache. This run must
+  # restore that cache and pack build must leave the restored .ttc files unchanged.
+  # The reusable workflow checks out this repo before pre_build, so the script is present.
+  build-root-from-github-cache:
+    needs: build-root-for-cache
+    uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
+    with:
+      run_tests: false
+      pre_build: bash "$GITHUB_WORKSPACE/scripts/ci/guard-cached-pack-build.sh" test_bin
 
   # pack_state must equal pack_states[0]
   check-pack-state-output:
@@ -239,19 +270,18 @@ jobs:
         with:
           state: ${{ fromJSON(needs.build-root-for-cache.outputs.pack_states)[0] }}
 
-      - name: Run the package
+      - name: Run the package from the restored build
         working-directory: ${{ needs.build-root-for-cache.outputs.project_dir }}
         env:
           PACKAGE: ${{ needs.build-root-for-cache.outputs.package }}
-        run: pack run "$PACKAGE"
+          BUILD_DIR: ${{ needs.build-root-for-cache.outputs.build_dir }}
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/run-restored-executable.sh"
 
       - name: Upload the single-collection pack state
         id: upload-pack-state
         uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@master
         with:
-          package: ${{ needs.build-root-for-cache.outputs.package }}
-          collection: ${{ fromJSON(needs.build-root-for-cache.outputs.collections)[0] }}
-          label: single-collection
+          state: ${{ fromJSON(needs.build-root-for-cache.outputs.pack_states)[0] }}-reupload
           project_dir: ${{ needs.build-root-for-cache.outputs.project_dir }}
           build_dir: ${{ needs.build-root-for-cache.outputs.build_dir }}
   # jscpd:ignore-end
@@ -279,5 +309,6 @@ jobs:
         working-directory: ${{ needs.build-root-for-cache.outputs.project_dir }}
         env:
           PACKAGE: ${{ needs.build-root-for-cache.outputs.package }}
-        run: pack run "$PACKAGE"
+          BUILD_DIR: ${{ needs.build-root-for-cache.outputs.build_dir }}
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/run-restored-executable.sh"
   # jscpd:ignore-end

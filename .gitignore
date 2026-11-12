@@ -1,1 +1,4 @@
 build/
+.tewyn
+.pi
+__pycache__
