@@ -1,0 +1,14 @@
+name: Resolve pack directories
+description: Resolve pack directories using PACK overrides, XDG paths, and HOME defaults.
+runs:
+  using: composite
+  steps:
+    - name: Resolve pack directories
+      shell: bash
+      run: |
+        {
+          echo "PACK_USER_DIR=${PACK_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pack}"
+          echo "PACK_STATE_DIR=${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}"
+          echo "PACK_CACHE_DIR=${PACK_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pack}"
+          echo "PACK_BIN_DIR=${PACK_BIN_DIR:-$HOME/.local/bin}"
+        } >> "$GITHUB_ENV"

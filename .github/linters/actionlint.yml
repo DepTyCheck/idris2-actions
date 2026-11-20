@@ -1,0 +1,5 @@
+paths:
+  .github/workflows/build-and-test.yml:
+    # shortcut: actionlint does not recognize $/ refs; remove when its parser supports them.
+    ignore:
+      - '^specifying action "\$/\.github/actions/[a-z0-9-]+" in invalid format because ref is missing\.'

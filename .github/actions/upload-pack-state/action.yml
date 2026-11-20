@@ -25,6 +25,9 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Resolve pack directories
+      uses: $/.github/actions/resolve-pack-directories
+
     - name: Tar the pack state and build dir
       shell: bash
       working-directory: ${{ inputs.project_dir }}
@@ -50,10 +53,7 @@ runs:
 
         paths=("$PWD/$BUILD_DIR")
         [ -f "$PWD/pack.toml" ] && paths+=("$PWD/pack.toml")
-        for d in "${PACK_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pack}" \
-                 "${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}" \
-                 "${PACK_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pack}" \
-                 "${PACK_BIN_DIR:-$HOME/.local/bin}"; do
+        for d in "$PACK_USER_DIR" "$PACK_STATE_DIR" "$PACK_CACHE_DIR" "$PACK_BIN_DIR"; do
           [ -d "$d" ] && paths+=("$d")
         done
 

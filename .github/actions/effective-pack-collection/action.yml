@@ -1,43 +1,48 @@
-name: Calculate effective pack collection
-description: >-
-  Resolve the effective pack collection name and its DB path.
+name: Calculate effective pack collections
+description: Resolve requested pack collections and their DB paths without switching pack state.
 
 inputs:
-  collection:
-    description: Requested pack collection (e.g. nightly-** or latest or HEAD).
+  collections:
+    description: JSON array of requested collection names, e.g. ["latest", "HEAD"].
     required: true
 
 outputs:
-  effective_collection:
-    description: Effective pack collection name
-    value: ${{ steps.calc.outputs.effective_collection }}
-  pack_collection_db:
-    description: Path to the effective collection's DB toml under the pack state dir.
-    value: ${{ steps.calc.outputs.pack_collection_db }}
+  resolved_collections:
+    description: JSON array of collection, effective_collection, pack_collection_db, and pack_hash objects.
+    value: ${{ steps.calc.outputs.resolved_collections }}
 
 runs:
   using: composite
   steps:
-    - name: Calculate effective pack collection
+    - name: Calculate effective pack collections
       id: calc
       shell: bash
       env:
-        COLLECTION: ${{ inputs.collection }}
+        COLLECTIONS: ${{ inputs.collections }}
       run: |
-        state_dir="${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}"
-        effective_collection=$(sed -n 's/^[[:space:]]*collection[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$state_dir/pack.toml" | tail -n 1)
-        effective_collection="${effective_collection:-$COLLECTION}"
-        collection_db="$state_dir/db/$effective_collection.toml"
+        jq -e 'type == "array" and all(.[];
+          type == "string" and length > 0 and . != "." and . != ".."
+          and (test("[/[:cntrl:]]") | not))' <<< "$COLLECTIONS" > /dev/null
 
-        echo "Effective pack collection: $effective_collection"
-        echo "Pack collection DB: $collection_db"
+        db="${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}/db"
+        test -d "$db"
+        resolved=$(
+          jq -r '.[]' <<< "$COLLECTIONS" | while IFS= read -r collection; do
+            effective="$collection"
+            if [ "$collection" = latest ]; then
+              effective=$(find "$db" -maxdepth 1 -name '*.toml' ! -name HEAD.toml -exec basename {} .toml \; | LC_ALL=C sort | tail -n 1)
+              effective="${effective:-HEAD}"
+            fi
 
-        {
-          echo "effective_collection=$effective_collection"
-          echo "pack_collection_db=$collection_db"
-        } >> "$GITHUB_OUTPUT"
-
-        {
-          echo "EFFECTIVE_COLLECTION=$effective_collection"
-          echo "PACK_COLLECTION_DB=$collection_db"
-        } >> "$GITHUB_ENV"
+            file="$db/$effective.toml"
+            if [ ! -f "$file" ]; then
+              echo "error: collection DB unavailable: $file" >&2
+              exit 1
+            fi
+            hash=$(sha256sum < "$file") || exit 1
+            jq -cn --arg collection "$collection" --arg effective "$effective" \
+              --arg file "$file" --arg hash "${hash:0:16}" \
+              '{collection:$collection, effective_collection:$effective, pack_collection_db:$file, pack_hash:$hash}'
+          done | jq -sc .
+        )
+        echo "resolved_collections=$resolved" >> "$GITHUB_OUTPUT"

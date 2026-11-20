@@ -19,7 +19,7 @@ on:
         type: string
         default: "[]"
       continue_on_error_collections:
-        description: JSON array of pack collections whose pre-build, pack build, pack-state require, pre-test, and pack test steps may fail without failing the job, e.g. ["HEAD"]. Empty array keeps every failure failing the run.
+        description: JSON array of pack collections whose pre-build, pack build, pack-state require, pre-test, and pack test steps may fail without failing the job, e.g. ["HEAD"]. Empty array makes these command failures fail the run.
         required: false
         type: string
         default: "[]"
@@ -96,11 +96,11 @@ jobs:
       # Each row is collection, effective_collection, and state.
       # state is the cache key and the artifact name.
       build_n_test_matrix: ${{ steps.names.outputs.build_n_test_matrix }}
-      package: ${{ steps.matrix.outputs.package }}
-      project_dir: ${{ steps.matrix.outputs.project_dir }}
-      build_dir: ${{ steps.matrix.outputs.build_dir }}
+      package: ${{ steps.inspect.outputs.package }}
+      project_dir: ${{ steps.inspect.outputs.project_dir }}
+      build_dir: ${{ steps.inspect.outputs.build_dir }}
       # SHA-256 of the package sources: the .ipkg, src/ if it exists, and pack.toml if it exists
-      hash: ${{ steps.matrix.outputs.hash }}
+      hash: ${{ steps.inspect.outputs.hash }}
       upstream: ${{ steps.matrix.outputs.upstream }}
       # SHA-256 of [idris2] url + commit from local pack.toml if it exists
       compiler_hash: ${{ steps.matrix.outputs.compiler_hash }}
@@ -113,7 +113,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Find the package .ipkg
+      - name: Inspect package
+        id: inspect
         env:
           IPKG_PATH: ${{ inputs.ipkg_path }}
         run: |
@@ -145,43 +146,39 @@ jobs:
             exit 1
           fi
 
-          {
-            echo "IPKG=$ipkg"
-            echo "PROJECT_DIR=$(dirname "$ipkg")"
-          } >> "$GITHUB_ENV"
+          project_dir=$(dirname "$ipkg")
 
-      - name: Parse package name and build dir
-        run: |
-          package=$(awk '/^[[:space:]]*package[[:space:]]/ {print $2; exit}' "$IPKG")
+          package=$(awk '/^[[:space:]]*package[[:space:]]/ {print $2; exit}' "$ipkg")
 
-          builddir_line=$(awk '/^[[:space:]]*builddir[[:space:]]*=/ {print; exit}' "$IPKG") # find the line
-          build_dir="${builddir_line#*=}"           # get the path
-          build_dir="${build_dir//[\"[:space:]]/}"  # strip quotes
-          build_dir="${build_dir:-build}"           # set default `build`
+          builddir_line=$(awk '/^[[:space:]]*builddir[[:space:]]*=/ {print; exit}' "$ipkg")
+          build_dir="${builddir_line#*=}"
+          build_dir="${build_dir//[\"[:space:]]/}"
+          build_dir="${build_dir:-build}"
 
           echo "Package '$package', build dir '$build_dir'"
-          {
-            echo "PACKAGE=$package"
-            echo "BUILD_DIR=$build_dir"
-          } >> "$GITHUB_ENV"
 
-      - name: Hash sources for the cache key
-        run: |
           # Hash of the package's sources
           # from https://stackoverflow.com/q/545387
-          paths=("$IPKG")
-          [ ! -d "$PROJECT_DIR/src" ] || paths+=("$PROJECT_DIR/src")
-          [ ! -f "$PROJECT_DIR/pack.toml" ] || paths+=("$PROJECT_DIR/pack.toml")
+          paths=("$ipkg")
+          [ ! -d "$project_dir/src" ] || paths+=("$project_dir/src")
+          [ ! -f "$project_dir/pack.toml" ] || paths+=("$project_dir/pack.toml")
           hash=$(find "${paths[@]}" -type f -print0 \
             | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)
 
           echo "Source hash: $hash"
-          echo "HASH=$hash" >> "$GITHUB_ENV"
+          {
+            echo "ipkg=$ipkg"
+            echo "project_dir=$project_dir"
+            echo "package=$package"
+            echo "build_dir=$build_dir"
+            echo "hash=$hash"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Compute build collections
         id: matrix
         env:
           PACK_COLLECTIONS: ${{ inputs.pack_collections }}
+          PROJECT_DIR: ${{ steps.inspect.outputs.project_dir }}
         run: |
           custom_compiler=false
           compiler_hash=""
@@ -216,32 +213,29 @@ jobs:
 
           echo "Collections: $collections; custom compiler: $custom_compiler"
           {
-            echo "package=$PACKAGE"
-            echo "project_dir=$PROJECT_DIR"
-            echo "build_dir=$BUILD_DIR"
             echo "collections=$collections"
-            echo "hash=$HASH"
             echo "upstream=$upstream"
             echo "compiler_hash=$compiler_hash"
           } >> "$GITHUB_OUTPUT"
 
       - name: Resolve pack directories
-        run: |
-          {
-            echo "PACK_USER_DIR=${PACK_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pack}"
-            echo "PACK_STATE_DIR=${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}"
-            echo "PACK_CACHE_DIR=${PACK_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pack}"
-            echo "PACK_BIN_DIR=${PACK_BIN_DIR:-$HOME/.local/bin}"
-          } >> "$GITHUB_ENV"
+        uses: $/.github/actions/resolve-pack-directories
 
       - name: Update pack database
-        working-directory: ${{ env.PROJECT_DIR }}
+        working-directory: ${{ steps.inspect.outputs.project_dir }}
         run: pack update-db
+
+      - name: Resolve build collections
+        id: effective
+        uses: $/.github/actions/effective-pack-collection
+        with:
+          collections: ${{ steps.matrix.outputs.collections }}
 
       - name: Name pack states
         id: names
         env:
-          COLLECTIONS: ${{ steps.matrix.outputs.collections }}
+          RESOLVED_COLLECTIONS: ${{ steps.effective.outputs.resolved_collections }}
+          HASH: ${{ steps.inspect.outputs.hash }}
           COMPILER_HASH: ${{ steps.matrix.outputs.compiler_hash }}
           UPSTREAM: ${{ steps.matrix.outputs.upstream }}
           CONTAINER_TAG: ${{ inputs.container_tag }}
@@ -250,39 +244,20 @@ jobs:
           . "${OS_RELEASE:-/etc/os-release}"
           OS="${ID}-${VERSION_ID}"
           CHEZ=$(chezscheme --version 2>&1 | awk 'NR==1 { print $NF }')
+          if [ -z "$UPSTREAM" ] && jq -e 'any(.[]; .collection == "HEAD")' <<< "$RESOLVED_COLLECTIONS" > /dev/null; then
+            UPSTREAM=$(git ls-remote https://github.com/idris-lang/Idris2 main | cut -c1-9)
+          fi
 
-          build_n_test_matrix='[]'
-          while IFS= read -r collection; do
-            [ -n "$collection" ] || continue
-            effective_collection="$collection"
-            if [ "$collection" = latest ]; then
-              effective_collection=$(find "$PACK_STATE_DIR/db" -maxdepth 1 -name '*.toml' ! -name HEAD.toml -exec basename {} .toml \; | LC_ALL=C sort | tail -n 1)
-              effective_collection="${effective_collection:-HEAD}"
-            fi
-            collection_db="$PACK_STATE_DIR/db/$effective_collection.toml"
-            # Hash the bytes only. GNU sha256sum prefixes '\' when the filename
-            # contains a backslash, and cut would then keep that instead of the hash.
-            pack_hash=$(sha256sum < "$collection_db" | cut -c1-16)
-            compiler_version=""
-            if [ "$collection" = HEAD ]; then
-              compiler_version="${UPSTREAM:-$(git ls-remote https://github.com/idris-lang/Idris2 main | cut -c1-9)}"
-            fi
-            state="pack-state-v3-$CONTAINER_TAG-$OS-$CHEZ-$HASH-$collection-$effective_collection-$pack_hash${compiler_version:+-$compiler_version}${COMPILER_HASH:+-$COMPILER_HASH}"
-            build_n_test_matrix=$(jq -c \
-              --arg collection "$collection" \
-              --arg state "$state" \
-              --arg effective "$effective_collection" \
-              '. + [{collection:$collection, state:$state, effective_collection:$effective}]' <<< "$build_n_test_matrix")
-          done < <(jq -r '.[]' <<< "$COLLECTIONS")
-
-          pack_states=$(jq -c 'map(.state)' <<< "$build_n_test_matrix")
-          pack_state=$(jq -r '.[0] // ""' <<< "$pack_states")
-          echo "Pack states: $pack_states"
-          {
-            echo "pack_states=$pack_states"
-            echo "pack_state=$pack_state"
-            echo "build_n_test_matrix=$build_n_test_matrix"
-          } >> "$GITHUB_OUTPUT"
+          jq -r --arg prefix "pack-state-v3-$CONTAINER_TAG-$OS-$CHEZ-$HASH" \
+            --arg upstream "$UPSTREAM" --arg compiler "$COMPILER_HASH" '
+            def state:
+              [$prefix, .collection, .effective_collection, .pack_hash,
+               (if .collection == "HEAD" then $upstream else empty end), $compiler]
+              | map(select(. != "")) | join("-");
+            map({collection, effective_collection, state: state}) as $matrix
+            | ($matrix | map(.state)) as $states
+            | "build_n_test_matrix=\($matrix | tojson)", "pack_states=\($states | tojson)", "pack_state=\($states[0] // "")"
+          ' <<< "$RESOLVED_COLLECTIONS" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ needs.get-upstream-matrix.outputs.package }} (${{ matrix.collection }})
@@ -307,13 +282,7 @@ jobs:
           persist-credentials: false
 
       - name: Resolve pack directories
-        run: |
-          {
-            echo "PACK_USER_DIR=${PACK_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pack}"
-            echo "PACK_STATE_DIR=${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}"
-            echo "PACK_CACHE_DIR=${PACK_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/pack}"
-            echo "PACK_BIN_DIR=${PACK_BIN_DIR:-$HOME/.local/bin}"
-          } >> "$GITHUB_ENV"
+        uses: $/.github/actions/resolve-pack-directories
 
       - name: Update pack database
         working-directory: ${{ env.PROJECT_DIR }}
@@ -350,9 +319,11 @@ jobs:
           working-directory: ${{ env.PROJECT_DIR }}
 
       - name: Switch collection
+        env:
+          EFFECTIVE_COLLECTION: ${{ matrix.effective_collection }}
         uses: $/.github/actions/retry-pack-command
         with:
-          command: pack switch "${{ matrix.effective_collection }}"
+          command: pack switch "$EFFECTIVE_COLLECTION"
           working-directory: ${{ env.PROJECT_DIR }}
 
       - name: Install dependencies
@@ -452,7 +423,7 @@ jobs:
           exit 1
 
       - name: Run pre-test script
-        if: ${{ inputs.pre_test != '' }}
+        if: ${{ inputs.pre_test != '' && steps.restore.outcome == 'success' }}
         continue-on-error: ${{ contains(fromJSON(inputs.continue_on_error_collections), matrix.collection) }}
         working-directory: ${{ needs.build.outputs.project_dir }}
         env:
@@ -460,6 +431,7 @@ jobs:
         run: bash -euo pipefail -c "$PRE_TEST"
 
       - name: Test ${{ needs.build.outputs.package }}
+        if: ${{ steps.restore.outcome == 'success' }}
         continue-on-error: ${{ contains(fromJSON(inputs.continue_on_error_collections), matrix.collection) }}
         working-directory: ${{ needs.build.outputs.project_dir }}
         env:

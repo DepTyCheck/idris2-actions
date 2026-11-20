@@ -277,68 +277,24 @@ commit = "unrelated"
     def test_test_job_runs_after_a_failed_build_unless_cancelled(self):
         self.assertEqual(WORKFLOW["jobs"]["test"]["if"], "${{ !cancelled() && inputs.run_tests }}")
 
-    def test_continue_on_error_collections_is_opt_in_on_named_steps(self):
-        trigger = WORKFLOW.get("on", WORKFLOW.get(True))
-        inputs = trigger["workflow_call"]["inputs"]
-        pack = inputs["pack_collections"]
-        inp = inputs.get("continue_on_error_collections")
-        self.assertIsNotNone(inp)
-        self.assertEqual(inp["default"], "[]")
-        self.assertEqual(inp["type"], pack["type"])
-        self.assertEqual(inp.get("required"), pack.get("required"))
-        expr = "${{ contains(fromJSON(inputs.continue_on_error_collections), matrix.collection) }}"
-        for job, name in (
-            ("build", "Run pre-build script"),
-            ("build", "Build ${{ needs.get-upstream-matrix.outputs.package }}"),
-            ("test", "Require a pack state from Build"),
-            ("test", "Run pre-test script"),
-            ("test", "Test ${{ needs.build.outputs.package }}"),
-        ):
-            self.assertEqual(step(job, name).get("continue-on-error"), expr, name)
-        for job in ("build", "test"):
-            self.assertNotIn("continue-on-error", WORKFLOW["jobs"][job])
-        self.assertTrue(step("test", "Restore the cached build").get("continue-on-error"))
-        self.assertNotEqual(step("test", "Restore the cached build").get("continue-on-error"), expr)
-        for name in ("Save build cache", "Upload pack state and build dir"):
-            self.assertNotIn("continue-on-error", step("build", name))
+    def restore_steps(self):
+        """Load restore steps by display name."""
+        action = yaml.safe_load((ROOT / ".github/actions/restore-pack-state/action.yml").read_text(encoding="utf-8"))
+        return {s["name"]: s for s in action["runs"]["steps"]}
 
-    def test_failed_pre_build_or_pack_build_skips_cache_and_upload(self):
-        self.assertEqual(step("build", "Run pre-build script").get("id"), "pre-build")
-        pack_build = step("build", "Build ${{ needs.get-upstream-matrix.outputs.package }}")
-        self.assertEqual(pack_build.get("id"), "pack-build")
-        self.assertEqual(pack_build.get("if"), "${{ steps.pre-build.outcome != 'failure' }}")
-        skip_failed = "steps.pre-build.outcome != 'failure' && steps.pack-build.outcome != 'failure'"
-        self.assertEqual(
-            step("build", "Save build cache")["if"],
-            "${{ steps.cache.outputs.cache-hit != 'true' && " + skip_failed + " }}",
-        )
-        self.assertEqual(
-            step("build", "Upload pack state and build dir")["if"],
-            "${{ inputs.upload_pack_state_artifacts && " + skip_failed + " }}",
-        )
-
-    def test_missing_pack_state_fails_test_with_build_message(self):
-        restore = step("test", "Restore the cached build")
-        self.assertEqual(restore.get("id"), "restore")
-        self.assertTrue(restore.get("continue-on-error"))
-        names = [s.get("name") for s in WORKFLOW["jobs"]["test"]["steps"]]
-        self.assertIn("Require a pack state from Build", names)
-        require = step("test", "Require a pack state from Build")
-        self.assertEqual(require["if"], "${{ steps.restore.outcome != 'success' }}")
-        result = self.run_script(require["run"], False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "The Build job for this pack state failed, so tests were skipped.",
-            result.stdout + result.stderr,
-        )
-        steps = WORKFLOW["jobs"]["test"]["steps"]
-        require_index = steps.index(require)
-        self.assertGreater(require_index, steps.index(restore))
-        self.assertGreater(steps.index(step("test", "Run pre-test script")), require_index)
-        self.assertGreater(
-            steps.index(step("test", "Test ${{ needs.build.outputs.package }}")),
-            require_index,
-        )
+    def test_restore_is_direct_named_download(self):
+        action = yaml.safe_load((ROOT / ".github/actions/restore-pack-state/action.yml").read_text(encoding="utf-8"))
+        self.assertEqual(set(action["inputs"]), {"state"})
+        self.assertNotIn("outputs", action)
+        self.assertEqual(len(action["runs"]["steps"]), 2)
+        download = self.restore_steps()["Download the packed build"]
+        self.assertEqual(download["with"], {"name": "${{ inputs.state }}"})
+        self.assertNotIn("continue-on-error", download)
+        self.env["STATE"] = "missing-state"
+        script = self.restore_steps()["Untar the pack state and build dir"]["run"]
+        self.assertNotEqual(self.run_script(script, False).returncode, 0)
+        (self.root / "missing-state.tar").write_text("corrupt archive", encoding="utf-8")
+        self.assertNotEqual(self.run_script(script, False).returncode, 0)
 
     def test_restore_uses_emitted_artifact_handles(self):
         upload = step("build", "Upload pack state and build dir")["with"]
@@ -378,13 +334,59 @@ commit = "unrelated"
     def test_source_hash_with_optional_config_and_source_directory(self):
         ipkg = self.project / "example.ipkg"
         ipkg.write_text("package example\n", encoding="utf-8")
-        self.env["IPKG"] = str(ipkg)
-        script = step("get-upstream-matrix", "Hash sources for the cache key")["run"]
+        self.env["IPKG_PATH"] = str(ipkg)
+        script = step("get-upstream-matrix", "Inspect package")["run"]
         self.run_script(script)
-        original = self.values("GITHUB_ENV")["HASH"]
+        original = self.values()["hash"]
         (self.project / "pack.toml").write_text(CUSTOM, encoding="utf-8")
         self.run_script(script)
-        self.assertNotEqual(self.values("GITHUB_ENV")["HASH"], original)
+        self.assertNotEqual(self.values()["hash"], original)
+        configured = self.values()["hash"]
+        (self.project / "src").mkdir()
+        (self.project / "src/Main.idr").write_text("module Main\n", encoding="utf-8")
+        self.run_script(script)
+        self.assertNotEqual(self.values()["hash"], configured)
+
+    def test_inspect_package(self):
+        script = step("get-upstream-matrix", "Inspect package")["run"]
+        self.env["IPKG_PATH"] = ""
+        self.assertNotEqual(self.run_script(script, False).returncode, 0)
+        ipkg = self.project / "example.ipkg"
+        for builddir, expected in (("-- builddir = ignored", "build"), ('builddir = "output"', "output")):
+            ipkg.write_text(f"package example\n{builddir}\n", encoding="utf-8")
+            self.run_script(script)
+            result = self.values()
+            self.assertEqual(result["package"], "example")
+            self.assertEqual(result["build_dir"], expected)
+            self.assertEqual(result["project_dir"], ".")
+            self.assertEqual(result["ipkg"], "./example.ipkg")
+            self.assertRegex(result["hash"], r"^[a-f0-9]{16}$")
+        (self.project / "other.ipkg").touch()
+        self.assertNotEqual(self.run_script(script, False).returncode, 0)
+        self.env["IPKG_PATH"] = "missing.ipkg"
+        self.assertNotEqual(self.run_script(script, False).returncode, 0)
+        nested = self.project / "nested"
+        nested.mkdir()
+        (nested / "lib.ipkg").write_text("package nested\n", encoding="utf-8")
+        self.env["IPKG_PATH"] = "nested/lib.ipkg"
+        self.run_script(script)
+        self.assertEqual(self.values()["project_dir"], "nested")
+        self.assertEqual(self.values()["package"], "nested")
+        self.assertNotIn("GITHUB_ENV", script)
+        outputs = WORKFLOW["jobs"]["get-upstream-matrix"]["outputs"]
+        for key in ("package", "project_dir", "build_dir", "hash"):
+            self.assertEqual(outputs[key], "${{ steps.inspect.outputs." + key + " }}")
+
+    def test_empty_state_matrix(self):
+        self.seed_pack_db()
+        self.write_os_release()
+        self.stub("chezscheme", 'echo "Chez Scheme Version 10.0.0" >&2')
+        self.resolve_collections("[]")
+        self.run_script(step("get-upstream-matrix", "Name pack states")["run"])
+        result = self.values()
+        self.assertEqual(json.loads(result["build_n_test_matrix"]), [])
+        self.assertEqual(json.loads(result["pack_states"]), [])
+        self.assertEqual(result["pack_state"], "")
 
     def write_os_release(self, version_id="24.04"):
         """Fixture os-release. The suite runs on machines without /etc/os-release."""
@@ -397,7 +399,7 @@ commit = "unrelated"
 
     def seed_pack_db(self, extra_collections=()):
         """Resolve pack dirs and create the DB files the name step hashes."""
-        self.run_script(step("get-upstream-matrix", "Resolve pack directories")["run"])
+        self.resolve_directories()
         self.env.update(self.values("GITHUB_ENV"))
         db = Path(self.env["PACK_STATE_DIR"]) / "db"
         db.mkdir(parents=True, exist_ok=True)
@@ -437,6 +439,7 @@ commit = "unrelated"
         extras = [name for name in json.loads(result["collections"]) if name != "latest"]
         self.seed_pack_db(extras)
         Path(self.env["GITHUB_OUTPUT"]).write_text("", encoding="utf-8")
+        self.resolve_collections(self.env["COLLECTIONS"])
         self.run_script(step("get-upstream-matrix", "Name pack states")["run"])
         result.update(self.values())
         return result
@@ -451,6 +454,7 @@ commit = "unrelated"
         self.stub("chezscheme", 'echo "Chez Scheme Version 10.0.0" >&2')
         self.seed_pack_db()
         Path(self.env["GITHUB_OUTPUT"]).write_text("", encoding="utf-8")
+        self.resolve_collections(self.env["COLLECTIONS"])
         self.run_script(step("get-upstream-matrix", "Name pack states")["run"])
         row = json.loads(self.values()["build_n_test_matrix"])[0]
         self.env["EFFECTIVE_COLLECTION"] = row["effective_collection"]
@@ -485,6 +489,71 @@ commit = "unrelated"
         self.assertNotIn(str(self.project / "pack.toml"), paths)
         self.assertNotIn("restore-keys", restore["with"])
 
+    def resolve_collections(self, collections):
+        """Run batch resolution and retain its output for naming."""
+        action = yaml.safe_load((ROOT / ".github/actions/effective-pack-collection/action.yml").read_text(encoding="utf-8"))
+        self.env["COLLECTIONS"] = collections
+        self.run_script(action["runs"]["steps"][0]["run"])
+        result = self.values()["resolved_collections"]
+        self.env["RESOLVED_COLLECTIONS"] = result
+        return json.loads(result)
+
+    def test_effective_collections(self):
+        db = self.seed_pack_db()
+        (db.parent / "pack.toml").write_text('collection="nightly-260101"', encoding="utf-8")
+        names = ["latest", "HEAD", "nightly-260101"]
+        rows = self.resolve_collections(json.dumps(names))
+        self.assertEqual([r["collection"] for r in rows], names)
+        self.assertEqual([r["effective_collection"] for r in rows], ["nightly-260102", "HEAD", "nightly-260101"])
+        for row in rows:
+            self.assertEqual(row["pack_collection_db"], str(db / (row["effective_collection"] + ".toml")))
+        self.assertEqual(self.resolve_collections("[]"), [])
+        for path in db.glob("nightly-*.toml"):
+            path.unlink()
+        self.assertEqual(self.resolve_collections('["latest"]')[0]["effective_collection"], "HEAD")
+        for name in ('quote"name', "back\\slash"):
+            (db / f"{name}.toml").touch()
+            self.assertEqual(self.resolve_collections(json.dumps([name]))[0]["collection"], name)
+
+    def test_invalid_effective_collections(self):
+        self.seed_pack_db()
+        action = yaml.safe_load((ROOT / ".github/actions/effective-pack-collection/action.yml").read_text(encoding="utf-8"))
+        for value in ("bad", "{}", "null", "1", "[null]", '[""]', "[1]", '["../HEAD"]', '["."]', '[".."]', '["missing"]', '["line\\nname"]'):
+            with self.subTest(value=value):
+                self.env["COLLECTIONS"] = value
+                self.assertNotEqual(self.run_script(action["runs"]["steps"][0]["run"], False).returncode, 0)
+        shutil.rmtree(Path(self.env["PACK_STATE_DIR"]) / "db")
+        self.env["COLLECTIONS"] = '["latest"]'
+        self.assertNotEqual(self.run_script(action["runs"]["steps"][0]["run"], False).returncode, 0)
+
+    def resolve_directories(self):
+        """Run shared directory resolution and export its environment."""
+        action = yaml.safe_load((ROOT / ".github/actions/resolve-pack-directories/action.yml").read_text(encoding="utf-8"))
+        self.run_script(action["runs"]["steps"][0]["run"])
+        self.env.update(self.values("GITHUB_ENV"))
+
+    def test_pack_directory_resolution(self):
+        for kind, suffix, xdg in (
+            ("USER", ".config/pack", "CONFIG"),
+            ("STATE", ".local/state/pack", "STATE"),
+            ("CACHE", ".cache/pack", "CACHE"),
+            ("BIN", ".local/bin", None),
+        ):
+            key = f"PACK_{kind}_DIR"
+            self.env[key] = ""
+            if xdg:
+                self.env[f"XDG_{xdg}_HOME"] = ""
+            self.resolve_directories()
+            self.assertEqual(self.env[key], str(Path(self.env["HOME"]) / suffix))
+            if xdg:
+                self.env[key] = ""
+                self.env[f"XDG_{xdg}_HOME"] = str(self.root / "xdg space")
+                self.resolve_directories()
+                self.assertEqual(self.env[key], str(self.root / "xdg space/pack"))
+            self.env[key] = str(self.root / "override space")
+            self.resolve_directories()
+            self.assertEqual(self.env[key], str(self.root / "override space"))
+
     def test_pack_directory_overrides(self):
         for prefix in ("XDG", "PACK"):
             with self.subTest(prefix=prefix):
@@ -506,6 +575,7 @@ commit = "unrelated"
     def rerun_names(self):
         """Re-run pack-state naming after an input change."""
         Path(self.env["GITHUB_OUTPUT"]).write_text("", encoding="utf-8")
+        self.resolve_collections(self.env["COLLECTIONS"])
         self.run_script(step("get-upstream-matrix", "Name pack states")["run"])
         return self.values()["pack_state"]
 
@@ -528,6 +598,22 @@ commit = "unrelated"
         self.env["UPSTREAM"] = ""
         self.assertEqual(self.rerun_names(), head_key)
 
+    def test_switch_collection_is_literal(self):
+        name = 'nightly"; touch injected; #'
+        switch = step("build", "Switch collection")
+        log = self.root / "pack-args"
+        self.env.update(
+            COMMAND=switch["with"]["command"].replace("${{ matrix.effective_collection }}", name),
+            EFFECTIVE_COLLECTION=name,
+            WORKING_DIRECTORY=str(self.project),
+            PACK_LOG=str(log),
+        )
+        self.stub("pack", 'printf "%s\\0" "$@" > "$PACK_LOG"')
+        self.run_script(self.retry_script())
+        self.assertEqual(log.read_bytes().split(b"\0"), [b"switch", name.encode(), b""])
+        self.assertFalse((self.project / "injected").exists())
+        self.assertEqual(switch["env"]["EFFECTIVE_COLLECTION"], "${{ matrix.effective_collection }}")
+
     def test_restore_precedes_compiler_setup_and_reselects_collection(self):
         self.prepare_cache()
         switch = step("build", "Switch collection")
@@ -537,7 +623,7 @@ commit = "unrelated"
         )
         self.assertEqual(
             switch["with"]["command"],
-            'pack switch "${{ matrix.effective_collection }}"',
+            'pack switch "$EFFECTIVE_COLLECTION"',
         )
         self.assertEqual(switch["with"]["working-directory"], "${{ env.PROJECT_DIR }}")
         self.assertNotIn("run", switch)
@@ -572,7 +658,7 @@ grep -q database-compiler "$PACK_STATE_DIR/db/$2.toml"
 printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
 """,
         )
-        self.env["COMMAND"] = 'pack switch "nightly-260102"'
+        self.env["COMMAND"] = switch["with"]["command"]
         self.env["WORKING_DIRECTORY"] = str(self.project)
         self.run_script(self.retry_script())
         self.assertIn("database-compiler", database.read_text(encoding="utf-8"))
@@ -605,7 +691,6 @@ printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
     # pylint: disable-next=too-many-locals,too-many-statements
     def test_artifact_round_trip(self):
         upload = yaml.safe_load((ROOT / ".github/actions/upload-pack-state/action.yml").read_text(encoding="utf-8"))
-        restore = yaml.safe_load((ROOT / ".github/actions/restore-pack-state/action.yml").read_text(encoding="utf-8"))
         for mode in ("default", "pack", "xdg"):
             with self.subTest(mode=mode):
                 directories = {}
@@ -645,7 +730,8 @@ printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
                 self.assertEqual(set(upload["inputs"]), {"state", "project_dir", "build_dir"})
                 self.assertTrue(upload["inputs"]["state"]["required"])
                 self.env["STATE"] = result["pack_state"]
-                self.run_script(upload["runs"]["steps"][0]["run"])
+                self.resolve_directories()
+                self.run_script(next(s for s in upload["runs"]["steps"] if s["name"] == "Tar the pack state and build dir")["run"])
                 archive = self.root / f"{self.env['STATE']}.tar"
                 with tarfile.open(archive) as packed:
                     members = {m.name for m in packed.getmembers()}
@@ -656,7 +742,7 @@ printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
                     shutil.rmtree(directory)
                 shutil.rmtree(build)
                 (self.project / "pack.toml").unlink()
-                self.run_script(restore["runs"]["steps"][1]["run"])
+                self.run_script(self.restore_steps()["Untar the pack state and build dir"]["run"])
                 self.assertTrue(launcher.is_symlink())
                 self.assertEqual(
                     subprocess.check_output([str(launcher)], text=True).strip(),

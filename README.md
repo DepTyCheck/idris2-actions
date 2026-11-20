@@ -97,7 +97,7 @@ jobs:
 
       # Optional. Default: []. JSON array of pack collections whose pre-build,
       # pack build, pack-state require, pre-test, and pack test steps may fail
-      # without failing the job. Empty array keeps every failure failing the run.
+      # without failing the job. Empty array makes these command failures fail the run.
       # continue_on_error_collections: '["HEAD"]'
 
       # Optional. Default: true. Run `pack test` after building. Set false to only build and cache.
