@@ -344,13 +344,13 @@ jobs:
 
       - name: Switch to the bleeding edge compiler
         if: matrix.collection == 'HEAD'
-        uses: DepTyCheck/idris2-actions/.github/actions/retry-pack-command@v1
+        uses: $/.github/actions/retry-pack-command
         with:
           command: pack fetch
           working-directory: ${{ env.PROJECT_DIR }}
 
       - name: Switch collection
-        uses: DepTyCheck/idris2-actions/.github/actions/retry-pack-command@v1
+        uses: $/.github/actions/retry-pack-command
         with:
           command: pack switch "${{ matrix.effective_collection }}"
           working-directory: ${{ env.PROJECT_DIR }}
@@ -413,7 +413,7 @@ jobs:
 
       - name: Upload pack state and build dir
         if: ${{ inputs.upload_pack_state_artifacts && steps.pre-build.outcome != 'failure' && steps.pack-build.outcome != 'failure' }}
-        uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@v1
+        uses: $/.github/actions/upload-pack-state
         with:
           state: ${{ matrix.state }}
           project_dir: ${{ env.PROJECT_DIR }}
@@ -440,7 +440,7 @@ jobs:
       - name: Restore the cached build
         id: restore
         continue-on-error: true
-        uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@v1
+        uses: $/.github/actions/restore-pack-state
         with:
           state: ${{ matrix.state }}
 

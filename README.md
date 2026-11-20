@@ -262,3 +262,6 @@ python3 -m venv .venv
 ```
 
 Linter configs live in `.github/linters`.
+
+The workflow uses its bundled actions from the same commit via `$/` references.
+Calling the workflow at `@v1` uses the workflow and actions from `v1`; calling it at `@master` uses both from `master`.

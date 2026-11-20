@@ -533,7 +533,7 @@ commit = "unrelated"
         switch = step("build", "Switch collection")
         self.assertEqual(
             switch["uses"],
-            "DepTyCheck/idris2-actions/.github/actions/retry-pack-command@v1",
+            "$/.github/actions/retry-pack-command",
         )
         self.assertEqual(
             switch["with"]["command"],
@@ -580,7 +580,7 @@ printf 'collection="%s"\n' "$2" > "$PACK_STATE_DIR/pack.toml"
         self.assertEqual((self.project / "pack.toml").read_text(encoding="utf-8"), CUSTOM)
 
     def test_bleeding_edge_pin_is_not_retried(self):
-        action = "DepTyCheck/idris2-actions/.github/actions/retry-pack-command@v1"
+        action = "$/.github/actions/retry-pack-command"
         steps = WORKFLOW["jobs"]["build"]["steps"]
         restore_index = steps.index(step("build", "Restore build cache"))
         pin = step("build", "Pin bleeding-edge Idris2 commit")
