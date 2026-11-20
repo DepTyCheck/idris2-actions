@@ -10,59 +10,166 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  # Test effective-pack-collection against several collections.
+  # Resolve names without fetching compilers or switching the active collection.
   test-effective-pack-collection:
     runs-on: ubuntu-latest
     container: ghcr.io/stefan-hoeck/idris2-pack:latest
     strategy:
       fail-fast: false
       matrix:
-        collection:
-          - HEAD
-          - latest
-          - nightly-260623
+        collections:
+          - '["HEAD"]'
+          - '["latest"]'
+          - '["nightly-260623"]'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
+      - name: Install jq
+        run: apt-get update && apt-get install -y jq
 
       - name: Update pack database
         run: pack update-db
 
-      - name: Switch to the bleeding edge compiler
-        if: matrix.collection == 'HEAD'
-        run: |
-          { echo; echo "[idris2]"; echo 'commit = "latest:main"'; } >> pack.toml
-          pack fetch
-
-      - name: Switch collection
-        env:
-          COLLECTION: ${{ matrix.collection }}
-        run: pack switch "$COLLECTION"
-
-      - name: Calculate effective pack collection
+      - name: Calculate effective pack collections
         id: effective
         uses: DepTyCheck/idris2-actions/.github/actions/effective-pack-collection@master
         with:
-          collection: ${{ matrix.collection }}
+          collections: ${{ matrix.collections }}
 
-      - name: Check outputs are not empty
+      - name: Check resolved collection and database hash
         env:
-          EFFECTIVE_COLLECTION: ${{ steps.effective.outputs.effective_collection }}
-          PACK_COLLECTION_DB: ${{ steps.effective.outputs.pack_collection_db }}
+          REQUESTED: ${{ matrix.collections }}
+          RESOLVED: ${{ steps.effective.outputs.resolved_collections }}
         run: |
-          if [ -z "$EFFECTIVE_COLLECTION" ]; then
-            echo "error: effective_collection output is empty"
-            exit 1
+          count=$(printf '%s\n' "$RESOLVED" | jq 'length')
+          test "$count" -eq 1
+
+          requested=$(printf '%s\n' "$REQUESTED" | jq -r '.[0]')
+          actual=$(printf '%s\n' "$RESOLVED" | jq -r '.[0].collection')
+          test "$actual" = "$requested"
+
+          effective=$(printf '%s\n' "$RESOLVED" | jq -r '.[0].effective_collection')
+          db=$(printf '%s\n' "$RESOLVED" | jq -r '.[0].pack_collection_db')
+          state_dir="${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}"
+          test "$db" = "$state_dir/db/$effective.toml"
+
+          actual_hash=$(printf '%s\n' "$RESOLVED" | jq -r '.[0].pack_hash')
+          expected_hash=$(sha256sum < "$db" | cut -c1-16)
+          test "$actual_hash" = "$expected_hash"
+
+          if [ "$requested" = latest ]; then
+            expected=$(find "$state_dir/db" -maxdepth 1 -name '*.toml' ! -name HEAD.toml -exec basename {} .toml \; | LC_ALL=C sort | tail -n 1)
+            test "$effective" = "${expected:-HEAD}"
+          else
+            test "$effective" = "$requested"
           fi
-          if [ -z "$PACK_COLLECTION_DB" ]; then
-            echo "error: pack_collection_db output is empty"
-            exit 1
-          fi
-          echo "effective_collection=$EFFECTIVE_COLLECTION"
-          echo "pack_collection_db=$PACK_COLLECTION_DB"
+
+  test-collection-edge-cases:
+    runs-on: ubuntu-latest
+    env:
+      PACK_STATE_DIR: ${{ github.workspace }}/collection-fixture
+    steps:
+      - name: Create isolated collection databases and a conflicting active collection
+        run: |
+          mkdir -p "$PACK_STATE_DIR/db"
+          printf 'HEAD database\n' > "$PACK_STATE_DIR/db/HEAD.toml"
+          printf 'older database\n' > "$PACK_STATE_DIR/db/nightly-260101.toml"
+          printf 'newer database\n' > "$PACK_STATE_DIR/db/nightly-260102.toml"
+          echo 'collection="missing-active-collection"' > "$PACK_STATE_DIR/pack.toml"
+
+      - name: Resolve a batch with repeated latest entries
+        id: batch
+        uses: DepTyCheck/idris2-actions/.github/actions/effective-pack-collection@master
+        with:
+          collections: '["latest","HEAD","nightly-260101","latest"]'
+
+      - name: Check order, aliases, and hashes independently of active pack state
+        env:
+          RESOLVED: ${{ steps.batch.outputs.resolved_collections }}
+        run: |
+          count=$(printf '%s\n' "$RESOLVED" | jq 'length')
+          test "$count" -eq 4
+
+          index=0
+          for requested in latest HEAD nightly-260101 latest; do
+            row=$(printf '%s\n' "$RESOLVED" | jq -c ".[$index]")
+            actual=$(printf '%s\n' "$row" | jq -r '.collection')
+            test "$actual" = "$requested"
+
+            expected="$requested"
+            if [ "$requested" = latest ]; then
+              expected=nightly-260102
+            fi
+            effective=$(printf '%s\n' "$row" | jq -r '.effective_collection')
+            test "$effective" = "$expected"
+
+            db=$(printf '%s\n' "$row" | jq -r '.pack_collection_db')
+            test "$db" = "$PACK_STATE_DIR/db/$expected.toml"
+
+            actual_hash=$(printf '%s\n' "$row" | jq -r '.pack_hash')
+            expected_hash=$(sha256sum < "$db" | cut -c1-16)
+            test "$actual_hash" = "$expected_hash"
+            index=$((index + 1))
+          done
+
+      - name: Resolve an empty batch
+        id: empty
+        uses: DepTyCheck/idris2-actions/.github/actions/effective-pack-collection@master
+        with:
+          collections: "[]"
+
+      - name: Leave only the HEAD database
+        run: rm "$PACK_STATE_DIR/db/nightly-260101.toml" "$PACK_STATE_DIR/db/nightly-260102.toml"
+
+      - name: Resolve latest with only HEAD available
+        id: fallback
+        uses: DepTyCheck/idris2-actions/.github/actions/effective-pack-collection@master
+        with:
+          collections: '["latest"]'
+
+      - name: Check empty batch and HEAD fallback
+        env:
+          EMPTY: ${{ steps.empty.outputs.resolved_collections }}
+          FALLBACK: ${{ steps.fallback.outputs.resolved_collections }}
+        run: |
+          empty_type=$(printf '%s\n' "$EMPTY" | jq -r 'type')
+          test "$empty_type" = array
+          empty_count=$(printf '%s\n' "$EMPTY" | jq 'length')
+          test "$empty_count" -eq 0
+
+          fallback_count=$(printf '%s\n' "$FALLBACK" | jq 'length')
+          test "$fallback_count" -eq 1
+          requested=$(printf '%s\n' "$FALLBACK" | jq -r '.[0].collection')
+          test "$requested" = latest
+          effective=$(printf '%s\n' "$FALLBACK" | jq -r '.[0].effective_collection')
+          test "$effective" = HEAD
+          db=$(printf '%s\n' "$FALLBACK" | jq -r '.[0].pack_collection_db')
+          test "$db" = "$PACK_STATE_DIR/db/HEAD.toml"
+
+      - name: Reject an unavailable collection
+        id: unavailable
+        continue-on-error: true
+        uses: DepTyCheck/idris2-actions/.github/actions/effective-pack-collection@master
+        with:
+          collections: '["missing"]'
+
+      - name: Reject an object instead of an array
+        id: invalid
+        continue-on-error: true
+        uses: DepTyCheck/idris2-actions/.github/actions/effective-pack-collection@master
+        with:
+          collections: "{}"
+
+      - name: Check invalid requests failed
+        env:
+          UNAVAILABLE: ${{ steps.unavailable.outcome }}
+          INVALID: ${{ steps.invalid.outcome }}
+        run: |
+          test "$UNAVAILABLE" = failure
+          test "$INVALID" = failure
 
   # Build test libs with different configs
   build-n-test:
@@ -85,8 +192,7 @@ jobs:
       ipkg_path: test_projects/test_failing_head/test_failing_head.ipkg
       pack_collections: '["latest", "HEAD"]'
       continue_on_error_collections: '["HEAD"]'
-      # EFFECTIVE_COLLECTION is only on the switch step. pack switch has
-      # already written the resolved collection into the pack state.
+      # pack switch has written the resolved collection into the pack state.
       pre_build: |
         state_dir="${PACK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pack}"
         collection=$(sed -n 's/^[[:space:]]*collection[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$state_dir/pack.toml" | tail -n 1)
@@ -127,6 +233,122 @@ jobs:
             exit 1
           fi
           echo "latest pack state present; HEAD pack state absent"
+
+      - name: Assert HEAD tests were skipped and latest tests passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          pages=$(gh api --paginate --slurp "/repos/$REPO/actions/runs/$RUN_ID/jobs")
+          jobs=$(printf '%s\n' "$pages" | jq '[.[].jobs[]]')
+
+          for collection in HEAD latest; do
+            job_name="build-failing-head / Test test_failing_head ($collection)"
+            echo "Checking $job_name"
+            matches=$(printf '%s\n' "$jobs" | jq -c --arg name "$job_name" '[.[] | select(.name == $name)]')
+            count=$(printf '%s\n' "$matches" | jq 'length')
+            if [ "$count" -ne 1 ]; then
+              echo "::error::Expected exactly one job named $job_name; found $count"
+              exit 1
+            fi
+
+            job=$(printf '%s\n' "$matches" | jq -c '.[0]')
+            result=$(printf '%s\n' "$job" | jq -r '.conclusion')
+            test "$result" = success
+
+            require_result=$(printf '%s\n' "$job" | jq -r '.steps[] | select(.name == "Require a pack state from Build") | .conclusion')
+            test_result=$(printf '%s\n' "$job" | jq -r '.steps[] | select(.name == "Test test_failing_head") | .conclusion')
+            if [ "$collection" = HEAD ]; then
+              test "$require_result" = success
+              test "$test_result" = skipped
+            else
+              test "$require_result" = skipped
+              test "$test_result" = success
+            fi
+          done
+
+  test-pack-directory-overrides:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        directory_mode: [pack, xdg]
+    steps:
+      - name: Create build and pack state in custom directories
+        env:
+          MODE: ${{ matrix.directory_mode }}
+        run: |
+          base="$GITHUB_WORKSPACE/pack fixture"
+          user="$base/user"
+          state="$base/state"
+          cache="$base/cache"
+          if [ "$MODE" = xdg ]; then
+            user="$base/config/pack"
+            state="$base/state/pack"
+            cache="$base/cache/pack"
+            {
+              echo "XDG_CONFIG_HOME=$base/config"
+              echo "XDG_STATE_HOME=$base/state"
+              echo "XDG_CACHE_HOME=$base/cache"
+            } >> "$GITHUB_ENV"
+          else
+            {
+              echo "PACK_USER_DIR=$user"
+              echo "PACK_STATE_DIR=$state"
+              echo "PACK_CACHE_DIR=$cache"
+              # Explicit PACK paths must win over conflicting XDG paths.
+              echo "XDG_CONFIG_HOME=$base/unused-config"
+              echo "XDG_STATE_HOME=$base/unused-state"
+              echo "XDG_CACHE_HOME=$base/unused-cache"
+            } >> "$GITHUB_ENV"
+          fi
+          {
+            echo "PACK_BIN_DIR=$base/bin"
+            echo "EXPECTED_USER=$user"
+            echo "EXPECTED_STATE=$state"
+            echo "EXPECTED_CACHE=$cache"
+          } >> "$GITHUB_ENV"
+          mkdir -p fixture/out "$user" "$state" "$cache" "$base/bin"
+          echo build > fixture/out/marker
+          echo config > fixture/pack.toml
+          for dir in "$user" "$state" "$cache" "$base/bin"; do
+            echo pack > "$dir/marker"
+          done
+          ln -s marker "$base/bin/marker-link"
+
+      - name: Upload custom pack directories and build
+        uses: DepTyCheck/idris2-actions/.github/actions/upload-pack-state@master
+        with:
+          state: directory-overrides-${{ matrix.directory_mode }}-${{ github.run_attempt }}
+          project_dir: fixture
+          build_dir: out
+
+      - name: Check directory resolution and remove the original files
+        env:
+          STATE: directory-overrides-${{ matrix.directory_mode }}-${{ github.run_attempt }}
+        run: |
+          test "$PACK_USER_DIR" = "$EXPECTED_USER"
+          test "$PACK_STATE_DIR" = "$EXPECTED_STATE"
+          test "$PACK_CACHE_DIR" = "$EXPECTED_CACHE"
+          rm -rf -- fixture "$GITHUB_WORKSPACE/pack fixture"
+          # The restore must use the downloaded archive, not the original local tar.
+          rm -- "$GITHUB_WORKSPACE/$STATE.tar"
+
+      - name: Restore the custom build and state
+        uses: DepTyCheck/idris2-actions/.github/actions/restore-pack-state@master
+        with:
+          state: directory-overrides-${{ matrix.directory_mode }}-${{ github.run_attempt }}
+
+      - name: Check build, config, pack directories, and symlink survived restoration
+        run: |
+          test "$(cat fixture/out/marker)" = build
+          test "$(cat fixture/pack.toml)" = config
+          for dir in "$PACK_USER_DIR" "$PACK_STATE_DIR" "$PACK_CACHE_DIR" "$PACK_BIN_DIR"; do
+            test "$(cat "$dir/marker")" = pack
+          done
+          test -L "$PACK_BIN_DIR/marker-link"
+          test "$(cat "$PACK_BIN_DIR/marker-link")" = pack
 
   build-custom-compiler-for-cache:
     uses: DepTyCheck/idris2-actions/.github/workflows/build-and-test.yml@master
